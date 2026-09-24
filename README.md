@@ -21,6 +21,7 @@ first.
 ## Table of contents
 
 - [Features](#features)
+- [Workflow](#workflow)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Optional add-ons](#optional-add-ons)
@@ -50,6 +51,45 @@ first.
 | 📱 **Phone bridge** *(optional)* | Talk to Raziel from your Android phone from anywhere, and have it ring/text/open an app on your phone in return |
 
 Every action that can't be undone is read back to you out loud and only runs after you say yes.
+
+## Workflow
+
+What happens between hearing the wake word and hearing a reply:
+
+```mermaid
+flowchart TD
+    A["💤 Sleeping — listening for the wake word"] -->|wake word heard| B["🎙️ Recording until you stop talking"]
+    B --> C["📝 Transcribing — faster-whisper (English or Hindi)"]
+    C --> D{"A yes/no question<br/>is pending?"}
+    D -- yes --> E["✅ Answer parsed — action runs or cancels"]
+    D -- no --> F{"Matches a fast-path<br/>command directly?"}
+    F -- yes --> G["⚡ Deterministic tool runs — no LLM call, near-instant"]
+    F -- no --> H["🧠 Local LLM (Ollama) reads the request"]
+    H --> I{"Needs a tool?"}
+    I -- yes --> J{"Risky action?<br/>(send, overwrite, shutdown...)"}
+    I -- no --> K["💬 Answers directly"]
+    J -- yes --> L["🗣️ Reads back what it's about to do,<br/>waits for a spoken yes/no"]
+    J -- no --> M["🔧 Tool runs immediately"]
+    G --> N["🔊 Spoken reply — Piper TTS"]
+    K --> N
+    L --> N
+    M --> N
+    E --> N
+    N --> O{"Said 'goodbye' /<br/>'go to sleep'?"}
+    O -- no --> B
+    O -- yes --> A
+```
+
+Two things keep it fast and safe:
+
+- **Fast path first.** Common phrases ("open notepad", "what time is it",
+  "pause the music") are matched in code before the LLM is even asked —
+  that's the difference between an instant reply and waiting on a model
+  inference every single time.
+- **Confirm before anything irreversible.** Sending a message, overwriting
+  a file, or shutting the PC down always gets read back to you first; it
+  only runs on a clear "yes", and silence, "no", or an unclear answer
+  cancels it.
 
 ## Prerequisites
 
