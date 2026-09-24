@@ -1,0 +1,1386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raziel</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: transparent;
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none; cursor: default;
+  }
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #status {
+    position: fixed; left: 12px; bottom: 12px;
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; letter-spacing: .02em;
+    color: #cfd6e4; text-shadow: 0 1px 3px rgba(0,0,0,.85);
+    opacity: .78; transition: opacity .4s;
+  }
+  #status .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #6b7280; box-shadow: 0 0 8px currentColor;
+    transition: background .35s;
+  }
+  #status[data-state="listening"] .dot { background: #4ade80; }
+  #status[data-state="thinking"]  .dot { background: #fbbf24; }
+  #status[data-state="speaking"]  .dot { background: #60a5fa; }
+  #status[data-link="down"] .dot  { background: #ef4444; }
+
+  #boot {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    color: #9aa4b8; font-size: 12px; letter-spacing: .08em;
+    background: rgba(8,10,14,.55); transition: opacity .6s; pointer-events: none;
+  }
+  #boot.hidden { opacity: 0; }
+
+  #debug {
+    position: fixed; right: 10px; top: 10px; display: none;
+    font: 10px/1.55 ui-monospace, Consolas, monospace;
+    color: #b9c4d8; background: rgba(8,10,14,.72);
+    padding: 8px 10px; border-radius: 6px; white-space: pre;
+  }
+  #debug.on { display: block; }
+</style>
+</head>
+<body>
+
+<div id="stage"></div>
+<div id="boot">LOADING</div>
+<div id="status" data-state="idle" data-link="down"><span class="dot"></span><span id="statusText">connecting</span></div>
+<div id="debug"></div>
+
+<!--
+  OFFLINE NOTE: these are CDN URLs. To run with no internet, download the three
+  files into ./libs/ and change the paths below to "./libs/three.module.js" etc.
+  If your previous avatar.html already had a working importmap, paste it here
+  instead — nothing below depends on where the modules come from.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@3.4.0/lib/three-vrm.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG — every number worth tuning lives here
+   ════════════════════════════════════════════════════════════════════════ */
+const CONFIG = {
+  modelPath: 'Raziel-1.vrm',
+  wsUrl: 'ws://127.0.0.1:8765',
+  reconnectMs: 1500,
+
+  framing: 'full',          // 'full' | 'upper' | 'face'
+  fov: 26,                  // low fov = less facial distortion, more "camera"
+  cameraDrift: 0.35,        // 0 = locked tripod, 1 = handheld. subtlety is the point
+
+  breathRate: 0.24,         // Hz (~14 breaths/min at rest)
+  blinkMin: 2.2, blinkMax: 6.0,
+  saccadeMin: 0.45, saccadeMax: 2.4,
+  weightShiftMin: 5.0, weightShiftMax: 12.0,
+
+  nodMin: 3.0, nodMax: 7.5, // spontaneous listening nods
+  gestureMin: 1.6, gestureMax: 4.2, // speaking hand gestures
+  idleGestureMin: 7.0, idleGestureMax: 18.0, // self-touch, stretches, glances
+  listenGestureMin: 5.0, listenGestureMax: 11.0,
+
+  gestureScale: 1.0,        // global multiplier on every hand/arm gesture
+  fingerCurl: 1.0,          // resting hand shape. 0 = flat "mannequin" hands
+  fingerSign: { left: -1, right: 1 }, // flip if fingers bend BACKWARDS on your VRM
+
+  visemeAttack: 28,         // higher = snappier mouth
+  visemeRelease: 13,
+  babbleAfterMs: 400,       // fall back to procedural mouth if visemes stop
+
+  // Safety ceiling. If Python sets "speaking" and then, for any reason, never
+  // sends speech_end (a dropped exception, a crashed playback thread, a stray
+  // call), the babble fallback above would otherwise run forever — the avatar
+  // would look like she's talking with nothing actually being said. This is
+  // generous enough for any real utterance but forces a return to idle if
+  // something upstream genuinely got stuck.
+  maxSpeakingMs: 25000,
+};
+
+/* ════════════════════════════════════════════════════════════════════════
+   MATH
+   ════════════════════════════════════════════════════════════════════════ */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const rand  = (a, b) => a + Math.random() * (b - a);
+const easeInOut = t => t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
+const easeOut   = t => 1 - Math.pow(1 - t, 3);
+// frame-rate independent exponential approach
+const damp = (a, b, lambda, dt) => lerp(a, b, 1 - Math.exp(-lambda * dt));
+
+// Cheap smooth pseudo-noise: three incommensurable sines never repeat visibly.
+function noise(t, seed = 0) {
+  return Math.sin(t * 0.73 + seed * 1.7) * 0.5
+       + Math.sin(t * 1.31 + seed * 3.1) * 0.32
+       + Math.sin(t * 2.19 + seed * 5.9) * 0.18;
+}
+
+// Critically-damped spring. Used anywhere a value must chase a target without
+// the dead linearity of a lerp — this is what makes motion read as physical.
+class Spring {
+  constructor(value = 0, stiffness = 9) {
+    this.value = value; this.target = value; this.vel = 0; this.k = stiffness;
+  }
+  to(t) { this.target = t; return this; }
+  step(dt) {
+    dt = Math.min(dt, 1 / 30);
+    const c = 2 * Math.sqrt(this.k);
+    this.vel += (this.k * (this.target - this.value) - c * this.vel) * dt;
+    this.value += this.vel * dt;
+    return this.value;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PAGE BACKGROUND MODES (chosen by avatar_window.py through the URL)
+     (no parameter)  DEFAULT. The page paints NO background - the renderer
+                     below has alpha - and the window is transparent
+                     (pywebview transparent=True). This is the see-through mode.
+     ?bg=0d1017      an opaque dark tile. Used for AVATAR_TRANSPARENCY = "none"
+                     and as the automatic fallback if transparency fails.
+     ?chroma=ff00ff  LEGACY colour-key mode. It does not work with WebView2
+                     (DirectComposition ignores window colour keys) and is no
+                     longer used; kept only so old URLs still load.
+   ════════════════════════════════════════════════════════════════════════ */
+const PAGE_PARAMS = new URLSearchParams(location.search);
+// Colour-keyed (see-through) mode. Antialiasing is switched OFF in this mode:
+// MSAA edge pixels are a blend of her colours and the transparent canvas, the
+// page then blends those with the magenta background, and the result is a
+// pinkish halo that is NOT exactly magenta - so the colour key can't remove it.
+// Aliased edges match the key exactly and cut out clean.
+const CHROMA_MODE = !!PAGE_PARAMS.get('chroma');
+
+(function applyChroma() {
+  const key = PAGE_PARAMS.get('chroma');
+  const bg = PAGE_PARAMS.get('bg');
+  // ?bg=0d1017 - opaque background tile. avatar_window.py uses this for
+  // AVATAR_TRANSPARENCY = "none", and when it sees that the transparent window
+  // did not take effect (the key colour still visible at the window edges).
+  if (!key && bg) {
+    const colour = '#' + bg.replace(/^#/, '');
+    document.documentElement.style.background = colour;
+    document.body.style.background = colour;
+    return;
+  }
+  if (!key) return;
+  const colour = '#' + key.replace(/^#/, '');
+  document.documentElement.style.background = colour;
+  document.body.style.background = colour;
+  // The status and debug overlays would otherwise sit on their own dark
+  // panels and show up as opaque rectangles in the punched-out window.
+  const style = document.createElement('style');
+  style.textContent = `#debug { background: rgba(0,0,0,.72) }`;
+  document.head.appendChild(style);
+})();
+
+/* ════════════════════════════════════════════════════════════════════════
+   SCENE
+   ════════════════════════════════════════════════════════════════════════ */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: !CHROMA_MODE, alpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(CONFIG.fov, innerWidth / innerHeight, 0.05, 40);
+scene.add(camera);
+
+// Three-point-ish lighting. Rim light is what stops a VRM reading as a sticker.
+const key = new THREE.DirectionalLight(0xfff4e8, 2.0);
+key.position.set(1.1, 2.0, 2.2); scene.add(key);
+const fill = new THREE.DirectionalLight(0xbcd4ff, 0.65);
+fill.position.set(-1.6, 0.9, 1.2); scene.add(fill);
+const rim = new THREE.DirectionalLight(0xcfe4ff, 1.25);
+rim.position.set(-0.7, 1.7, -2.4); scene.add(rim);
+scene.add(new THREE.HemisphereLight(0xe8f0ff, 0x2a2f3a, 0.75));
+
+// Gaze target parented to the camera == she looks down the lens, like a call.
+const lookTarget = new THREE.Object3D();
+lookTarget.position.set(0, 0, 0.1);
+camera.add(lookTarget);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  frameCamera();
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+   CAMERA FRAMING  (fix #3 — show the whole figure)
+   ════════════════════════════════════════════════════════════════════════ */
+let modelHeight = 1.6;
+let camBase = new THREE.Vector3(0, 1.2, 2.0);
+let camTargetY = 1.0;
+
+function measureModel(vrm) {
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  modelHeight = Math.max(0.5, box.max.y - box.min.y);
+  // Drop feet exactly on y=0 and centre horizontally so framing math is clean.
+  vrm.scene.position.x -= (box.max.x + box.min.x) / 2;
+  vrm.scene.position.z -= (box.max.z + box.min.z) / 2;
+  vrm.scene.position.y -= box.min.y;
+}
+
+function frameCamera() {
+  const modes = {
+    // coverage = fraction of model height the frame should span
+    full:  { coverage: 1.10, focusY: 0.50, pad: 1.02 },
+    upper: { coverage: 0.46, focusY: 0.78, pad: 1.05 },
+    face:  { coverage: 0.20, focusY: 0.925, pad: 1.05 },
+  };
+  const m = modes[CONFIG.framing] || modes.full;
+
+  const visibleHeight = modelHeight * m.coverage * m.pad;
+  // If the window is narrow, height isn't the binding constraint — width is.
+  const aspect = camera.aspect;
+  const neededForWidth = (modelHeight * 0.42) / aspect; // rough shoulder span
+  const target = Math.max(visibleHeight, neededForWidth);
+
+  const dist = (target / 2) / Math.tan((camera.fov * Math.PI / 180) / 2);
+  camTargetY = modelHeight * m.focusY;
+  camBase.set(0, camTargetY, dist);
+  camera.position.copy(camBase);
+  camera.lookAt(0, camTargetY, 0);
+}
+
+function setFraming(mode) {
+  if (!['full', 'upper', 'face'].includes(mode)) return;
+  CONFIG.framing = mode;
+  frameCamera();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RIG — humanoid bone control with a relaxed rest pose
+   ════════════════════════════════════════════════════════════════════════ */
+// Finger bones. VRM 1.0 names; getNormalizedBoneNode simply returns null for
+// any the model doesn't have, so listing all of them is safe.
+const FINGER_NAMES = ['Thumb','Index','Middle','Ring','Little'];
+const FINGER_SEGS  = ['Metacarpal','Proximal','Intermediate','Distal'];
+const FINGER_BONES = [];
+for (const side of ['left','right'])
+  for (const f of FINGER_NAMES)
+    for (const seg of FINGER_SEGS)
+      FINGER_BONES.push(side + f + seg);
+
+const BONES = [
+  'hips','spine','chest','upperChest','neck','head',
+  'leftShoulder','rightShoulder',
+  'leftUpperArm','rightUpperArm','leftLowerArm','rightLowerArm',
+  'leftHand','rightHand',
+  'leftUpperLeg','rightUpperLeg','leftLowerLeg','rightLowerLeg','jaw',
+  ...FINGER_BONES,
+];
+
+// VRM ships in T-pose. Nobody stands in a T-pose on a video call.
+const REST_POSE = {
+  // Small outward nudge (~2-3°) versus the original values, added to reduce
+  // forearm/hand-through-torso clipping (#7). This is a partial mitigation,
+  // not a fix: true elimination needs either cloth colliders/spring bones on
+  // the garment mesh itself, which this VRM may not have, or a higher-poly
+  // model. What this DOES do is buy a bit more clearance before any gesture
+  // even starts, which measurably reduces how often a moderate reach-in
+  // gesture actually penetrates the mesh.
+  leftUpperArm:  [0.06, -0.05, -1.20],
+  rightUpperArm: [0.06,  0.05,  1.20],
+  leftLowerArm:  [0.00, -0.28, -0.10],
+  rightLowerArm: [0.00,  0.28,  0.10],
+  leftHand:      [0.00,  0.00, -0.10],
+  rightHand:     [0.00,  0.00,  0.10],
+  leftShoulder:  [0.00,  0.00, -0.05],
+  rightShoulder: [0.00,  0.00,  0.05],
+  spine:         [0.02,  0.00,  0.00],
+  chest:         [-0.01, 0.00,  0.00],
+};
+
+// VRM hands ship with dead-straight fingers, which reads as a shop mannequin.
+// A relaxed hand has a progressive curl, strongest at the little finger.
+(function buildFingerRest() {
+  const curlBySeg = { Metacarpal: 0.06, Proximal: 0.20, Intermediate: 0.38, Distal: 0.26 };
+  const spread    = { Thumb: 0.00, Index: 0.85, Middle: 1.0, Ring: 1.12, Little: 1.25 };
+  for (const side of ['left','right']) {
+    const s = CONFIG.fingerSign[side];
+    for (const f of FINGER_NAMES) {
+      for (const seg of FINGER_SEGS) {
+        const name = side + f + seg;
+        if (f === 'Thumb') {
+          // Thumb opposes rather than curls — it rotates out and slightly in.
+          const amt = { Metacarpal: 0.28, Proximal: 0.20, Distal: 0.16 }[seg];
+          if (amt === undefined) continue;
+          REST_POSE[name] = [0, -s * amt * 0.7, s * amt * 0.5 * CONFIG.fingerCurl];
+        } else {
+          REST_POSE[name] = [0, 0, s * curlBySeg[seg] * spread[f] * CONFIG.fingerCurl];
+        }
+      }
+    }
+  }
+})();
+
+class Rig {
+  constructor(vrm) {
+    this.vrm = vrm;
+    this.bones = {};
+    this.rest = {};
+    this.restPos = {};
+    const missing = [];
+    for (const name of BONES) {
+      const node = vrm.humanoid?.getNormalizedBoneNode(name);
+      if (!node) { missing.push(name); continue; }
+      const pose = REST_POSE[name];
+      if (pose) node.rotation.set(pose[0], pose[1], pose[2]);
+      this.bones[name] = node;
+      this.rest[name] = node.quaternion.clone();
+      this.restPos[name] = node.position.clone();
+    }
+    // rig.rot(name, ...) on a missing bone is a SILENT no-op — reset() below
+    // pre-fills this.add for every name in BONES regardless of whether a
+    // real node exists, and apply() only walks this.bones, so a gesture that
+    // only touches missing bones runs to completion, reports as active in
+    // the debug overlay, and produces zero visible motion. If gestures still
+    // don't read after the ambientGesture fix, check this list first.
+    const core = ['leftUpperArm','rightUpperArm','leftLowerArm','rightLowerArm',
+                  'leftHand','rightHand','head','spine','hips'];
+    const missingCore = missing.filter(n => core.includes(n));
+    const missingFingers = missing.filter(n => /^(left|right)(Thumb|Index|Middle|Ring|Little)/.test(n));
+    console.log(`[avatar] rig: ${Object.keys(this.bones).length}/${BONES.length} bones found`);
+    if (missingCore.length) {
+      console.warn('[avatar] MISSING CORE BONES (gestures using these are pure no-ops):',
+                   missingCore.join(', '));
+    }
+    if (missingFingers.length > 0) {
+      console.log(`[avatar] this VRM has no finger bones (${missingFingers.length} missing) — ` +
+                  'hand-shape gestures will still move the arm, just not curl fingers. Cosmetic only.');
+    }
+    this._e = new THREE.Euler();
+    this._q = new THREE.Quaternion();
+    this.reset();
+  }
+  reset() {
+    this.add = {};
+    for (const name of BONES) this.add[name] = [0, 0, 0];
+    this.hipsOffset = [0, 0, 0];
+  }
+  rot(name, x, y, z) {
+    const a = this.add[name];
+    if (!a) return;
+    a[0] += x; a[1] += y; a[2] += z;
+  }
+  /**
+   * Open or close a hand on top of its rest curl.
+   * amount > 0 opens toward a flat palm, < 0 closes toward a fist.
+   */
+  finger(side, amount, only = null) {
+    const s = CONFIG.fingerSign[side];
+    const byS = { Metacarpal: 0.06, Proximal: 0.22, Intermediate: 0.40, Distal: 0.28 };
+    for (const f of FINGER_NAMES) {
+      if (f === 'Thumb') continue;
+      if (only && !only.includes(f)) continue;
+      for (const seg of FINGER_SEGS) {
+        if (!byS[seg]) continue;
+        this.rot(side + f + seg, 0, 0, -s * byS[seg] * amount);
+      }
+    }
+  }
+  /** Splay fingers apart — reads as emphasis or presentation. */
+  spread(side, amount) {
+    const s = CONFIG.fingerSign[side];
+    const off = { Index: 1, Middle: 0.3, Ring: -0.4, Little: -1.1 };
+    for (const f of FINGER_NAMES) {
+      if (f === 'Thumb') continue;
+      this.rot(side + f + 'Proximal', 0, s * off[f] * amount * 0.09, 0);
+    }
+  }
+  apply() {
+    for (const name in this.bones) {
+      const node = this.bones[name], a = this.add[name];
+      if (!a) continue;
+      this._e.set(a[0], a[1], a[2], 'YXZ');
+      this._q.setFromEuler(this._e);
+      node.quaternion.copy(this.rest[name]).multiply(this._q);
+    }
+    const hips = this.bones.hips;
+    if (hips) {
+      const r = this.restPos.hips;
+      hips.position.set(r.x + this.hipsOffset[0], r.y + this.hipsOffset[1], r.z + this.hipsOffset[2]);
+    }
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   EXPRESSIONS — every emotion is a blend, never a single slider slammed to 1
+   ════════════════════════════════════════════════════════════════════════ */
+const EMOTIONS = {
+  neutral:   { relaxed: 0.10 },
+  happy:     { happy: 0.62, relaxed: 0.18 },
+  amused:    { happy: 0.40, relaxed: 0.25 },
+  sad:       { sad: 0.55, relaxed: 0.10 },
+  concerned: { sad: 0.30, angry: 0.14 },          // worry = a little of both
+  focused:   { angry: 0.17, relaxed: 0.08 },      // brow-lowering, not anger
+  surprised: { surprised: 0.60 },
+  angry:     { angry: 0.55 },
+  confident: { happy: 0.20, relaxed: 0.22 },
+};
+const EMOTION_KEYS = ['happy','angry','sad','relaxed','surprised','neutral'];
+
+class Face {
+  constructor(vrm) {
+    this.em = vrm.expressionManager;
+    this.springs = {};
+    this.available = new Set();
+    for (const k of [...EMOTION_KEYS, 'aa','ih','ou','ee','oh','blink','blinkLeft','blinkRight']) {
+      if (this.em?.getExpression?.(k)) this.available.add(k);
+    }
+    for (const k of EMOTION_KEYS) this.springs[k] = new Spring(0, 5.5);
+    this.emotion = 'neutral';
+    this.intensity = 1;
+    this.overlay = {};   // transient additions from behaviour states
+  }
+  has(k) { return this.available.has(k); }
+  setEmotion(name, intensity = 1) {
+    if (!EMOTIONS[name]) name = 'neutral';
+    this.emotion = name;
+    this.intensity = clamp(intensity, 0, 1.4);
+  }
+  setOverlay(map) { this.overlay = map || {}; }
+  update(dt) {
+    if (!this.em) return;
+    const base = EMOTIONS[this.emotion] || {};
+    for (const k of EMOTION_KEYS) {
+      const t = clamp((base[k] || 0) * this.intensity + (this.overlay[k] || 0), 0, 1);
+      const v = this.springs[k].to(t).step(dt);
+      if (this.has(k)) this.em.setValue(k, clamp(v, 0, 1));
+    }
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   BLINKING — irregular, with double-blinks and state-dependent rate
+   ════════════════════════════════════════════════════════════════════════ */
+class Blinker {
+  constructor(face) {
+    this.face = face; this.t = 0; this.next = rand(1, 3);
+    this.phase = null; this.queued = 0; this.value = 0;
+  }
+  blinkNow(queueDouble = false) {
+    this.phase = 0;
+    if (queueDouble) this.queued = 1;
+  }
+  update(dt, rateScale = 1) {
+    if (this.phase === null) {
+      this.t += dt * rateScale;
+      if (this.t >= this.next) {
+        this.t = 0;
+        this.next = rand(CONFIG.blinkMin, CONFIG.blinkMax) / rateScale;
+        this.blinkNow(Math.random() < 0.18);
+      }
+    } else {
+      this.phase += dt;
+      const close = 0.055, hold = 0.035, open = 0.13;
+      const total = close + hold + open;
+      if (this.phase < close)            this.value = easeOut(this.phase / close);
+      else if (this.phase < close + hold) this.value = 1;
+      else if (this.phase < total)        this.value = 1 - easeInOut((this.phase - close - hold) / open);
+      else {
+        this.value = 0; this.phase = null;
+        if (this.queued) { this.queued = 0; this.phase = 0; }
+      }
+    }
+    if (this.face.has('blink')) this.face.em.setValue('blink', clamp(this.value, 0, 1));
+    return this.value;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   GAZE — saccades, gaze aversion while thinking, eye contact while listening
+   ════════════════════════════════════════════════════════════════════════ */
+class Gaze {
+  constructor() {
+    this.x = new Spring(0, 26); this.y = new Spring(0, 26);
+    this.t = 0; this.next = rand(0.4, 1.2);
+    this.bias = { x: 0, y: 0 }; // pushed by behaviour states
+    this.range = 0.035;
+  }
+  update(dt, state) {
+    this.t += dt;
+    if (this.t >= this.next) {
+      this.t = 0;
+      this.next = rand(CONFIG.saccadeMin, CONFIG.saccadeMax);
+      // Thinking = long looks away, up and to the side. Listening = tight,
+      // centred micro-saccades: that reads as attention.
+      const scale = state === 'thinking' ? 2.6 : state === 'listening' ? 0.55 : 1;
+      this.x.to(rand(-this.range, this.range) * scale + this.bias.x);
+      this.y.to(rand(-this.range * 0.6, this.range * 0.6) * scale + this.bias.y);
+    }
+    lookTarget.position.set(this.x.step(dt), this.y.step(dt), 0.1);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   LIP SYNC — visemes with attack/release, jaw coupling, babble fallback
+   ════════════════════════════════════════════════════════════════════════ */
+const VISEMES = ['aa','ih','ou','ee','oh'];
+const JAW_WEIGHT = { aa: 1.0, oh: 0.82, ou: 0.48, ee: 0.26, ih: 0.20 };
+
+class Mouth {
+  constructor(face) {
+    this.face = face;
+    this.target = {}; this.value = {};
+    for (const v of VISEMES) { this.target[v] = 0; this.value[v] = 0; }
+    this.expiry = {};
+    this.lastViseme = 0;
+    this.speaking = false;
+    this.jaw = 0;
+    this.energy = 0;      // 0..1, drives head/brow emphasis while speaking
+    this.level = 0;       // optional amplitude from Python
+  }
+  setViseme(name, weight = 1, duration = 0.09) {
+    if (!VISEMES.includes(name)) return;
+    for (const v of VISEMES) this.target[v] = 0;
+    this.target[name] = clamp(weight, 0, 1);
+    this.expiry[name] = performance.now() + duration * 1000;
+    this.lastViseme = performance.now();
+  }
+  silence() {
+    for (const v of VISEMES) this.target[v] = 0;
+  }
+  update(dt, now) {
+    // Expire stale visemes so the mouth never freezes mid-vowel.
+    for (const v of VISEMES) {
+      if (this.target[v] > 0 && this.expiry[v] && now > this.expiry[v]) this.target[v] = 0;
+    }
+    // Safety net: the Python viseme stream is untested. If we're told we're
+    // speaking but nothing arrives, generate plausible mouth movement instead
+    // of showing a motionless face.
+    if (this.speaking && now - this.lastViseme > CONFIG.babbleAfterMs) {
+      const t = now / 1000;
+      const drive = clamp(0.5 + noise(t * 5.2, 1) * 0.55, 0, 1);
+      const pick = VISEMES[Math.floor(clamp(0.5 + noise(t * 1.9, 4) * 0.5, 0, 0.999) * VISEMES.length)];
+      for (const v of VISEMES) this.target[v] = 0;
+      this.target[pick] = drive * (0.35 + 0.55 * clamp(this.level || 0.7, 0, 1));
+    }
+
+    let jawSum = 0, total = 0;
+    for (const v of VISEMES) {
+      const lambda = this.target[v] > this.value[v] ? CONFIG.visemeAttack : CONFIG.visemeRelease;
+      this.value[v] = damp(this.value[v], this.target[v], lambda, dt);
+      if (this.face.has(v)) this.face.em.setValue(v, clamp(this.value[v], 0, 1));
+      jawSum += this.value[v] * (JAW_WEIGHT[v] || 0.5);
+      total += this.value[v];
+    }
+    this.jaw = clamp(jawSum, 0, 1);
+    this.energy = damp(this.energy, clamp(total, 0, 1), 9, dt);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   GESTURES — short, additive, time-based bone animations
+   ════════════════════════════════════════════════════════════════════════ */
+class GestureLayer {
+  constructor() { this.active = []; this.rejected = 0; }
+  /** Returns true if the gesture actually started, false if it was blocked. */
+  play(name, opts = {}) {
+    const g = GESTURES[name];
+    if (!g) return false;
+    // Don't stack a gesture on top of itself — that's what causes arms to
+    // snap through the torso.
+    if (this.active.some(a => a.name === name)) { this.rejected++; return false; }
+    // Cap concurrency so composition stays readable. Raised from 3 to 4 —
+    // 3 was tight enough that a state-entry gesture (chinTouch, openPalm)
+    // regularly lost the slot to low-amplitude ambient filler (weightRock,
+    // settle) that had claimed it moments earlier, which is why gestures the
+    // debug overlay reported as active often weren't visible: the report
+    // was of what was REQUESTED, not what actually started.
+    if (this.active.length >= 4) { this.rejected++; return false; }
+    const amp = (opts.amplitude ?? 1) * CONFIG.gestureScale;
+    this.active.push({ name, fn: g.fn, dur: opts.duration || g.duration, t: 0, amp });
+    return true;
+  }
+  activeNames() { return this.active.map(a => a.name); }
+  has(name) { return this.active.some(a => a.name === name); }
+  clear() { this.active.length = 0; }
+  update(dt, rig) {
+    for (let i = this.active.length - 1; i >= 0; i--) {
+      const a = this.active[i];
+      a.t += dt;
+      const p = a.t / a.dur;
+      if (p >= 1) { this.active.splice(i, 1); continue; }
+      a.fn(p, a.amp, rig);
+    }
+  }
+}
+
+// Each gesture receives normalised progress 0..1, an amplitude, and the rig,
+// and ADDS bone rotation. They compose, so several can run at once.
+//
+// `amp` sign selects the arm for one-handed gestures: positive = left.
+// Envelopes: bell = Math.sin(p*PI) rises and falls once. Multiplying a faster
+// sine by a bell gives an oscillation that starts and ends at zero, which is
+// what stops gestures from popping.
+const bell = p => Math.sin(p * Math.PI);
+// Asymmetric envelope: quick out, slow return. How real gestures actually move.
+const throwEnv = p => p < 0.3 ? easeOut(p / 0.3) : 1 - easeInOut((p - 0.3) / 0.7);
+
+const GESTURES = {
+
+  /* ── head ─────────────────────────────────────────────────────────── */
+  nod: { duration: 0.95, fn: (p, amp, rig) => {
+    const w = Math.sin(p * Math.PI * 2) * bell(p);
+    rig.rot('head', w * 0.115 * amp, 0, 0);
+    rig.rot('neck', w * 0.055 * amp, 0, 0);
+  }},
+  doubleNod: { duration: 1.25, fn: (p, amp, rig) => {
+    const w = Math.sin(p * Math.PI * 4) * bell(p);
+    rig.rot('head', w * 0.095 * amp, 0, 0);
+    rig.rot('neck', w * 0.045 * amp, 0, 0);
+  }},
+  shake: { duration: 1.0, fn: (p, amp, rig) => {
+    const w = Math.sin(p * Math.PI * 4) * bell(p);
+    rig.rot('head', 0, w * 0.13 * amp, 0);
+    rig.rot('neck', 0, w * 0.05 * amp, 0);
+  }},
+  tilt: { duration: 2.4, fn: (p, amp, rig) => {
+    const w = bell(p);
+    rig.rot('head', 0, 0, w * 0.10 * amp);
+    rig.rot('neck', 0, 0, w * 0.035 * amp);
+  }},
+  glanceAway: { duration: 2.0, fn: (p, amp, rig) => {
+    const w = bell(p);
+    rig.rot('head', -w * 0.05 * amp, w * 0.09 * amp, w * 0.03 * amp);
+  }},
+  scanRoom: { duration: 3.6, fn: (p, amp, rig) => {
+    // Slow look one way then back — fills long idle stretches.
+    const w = Math.sin(p * Math.PI * 2) * bell(p);
+    rig.rot('head', 0, w * 0.16 * amp, w * 0.04 * amp);
+    rig.rot('neck', 0, w * 0.06 * amp, 0);
+    rig.rot('chest', 0, w * 0.03 * amp, 0);
+  }},
+
+  /* ── torso ────────────────────────────────────────────────────────── */
+  shrug: { duration: 1.4, fn: (p, amp, rig) => {
+    const w = bell(p);
+    rig.rot('leftShoulder', 0, 0, -w * 0.11 * amp);
+    rig.rot('rightShoulder', 0, 0, w * 0.11 * amp);
+    rig.rot('leftUpperArm', 0, 0, -w * 0.06 * amp);
+    rig.rot('rightUpperArm', 0, 0, w * 0.06 * amp);
+    rig.rot('head', -w * 0.03 * amp, 0, 0);
+  }},
+  lean: { duration: 3.2, fn: (p, amp, rig) => {
+    const w = bell(p);
+    rig.rot('spine', w * 0.055 * amp, 0, 0);
+    rig.rot('chest', w * 0.03 * amp, 0, 0);
+    rig.hipsOffset[2] += w * 0.012 * amp;
+  }},
+  torsoTwist: { duration: 3.0, fn: (p, amp, rig) => {
+    const w = bell(p);
+    rig.rot('spine', 0, w * 0.075 * amp, 0);
+    rig.rot('chest', 0, w * 0.055 * amp, 0);
+    rig.rot('head', 0, -w * 0.045 * amp, 0);  // head counter-rotates to hold gaze
+    rig.rot('leftUpperArm', 0, 0, w * 0.04 * amp);
+    rig.rot('rightUpperArm', 0, 0, w * 0.04 * amp);
+  }},
+  weightRock: { duration: 4.0, fn: (p, amp, rig) => {
+    // Shift onto one hip and back. The whole chain has to respond or it
+    // looks like the torso is sliding on rails.
+    const w = bell(p) * amp;
+    rig.hipsOffset[0] += w * 0.030;
+    rig.rot('hips', 0, 0, -w * 0.070);
+    rig.rot('spine', 0, 0, w * 0.045);
+    rig.rot('chest', 0, 0, w * 0.022);
+    rig.rot('head', 0, 0, -w * 0.030);
+    rig.rot('leftUpperLeg', 0, 0, -w * 0.030);
+    rig.rot('rightUpperLeg', 0, 0, -w * 0.030);
+    rig.rot('leftLowerLeg', w * 0.04, 0, 0);
+  }},
+  stretch: { duration: 4.5, fn: (p, amp, rig) => {
+    // Slow shoulder roll — the thing you do after sitting too long.
+    const w = bell(p) * amp;
+    rig.rot('leftShoulder', 0, 0, -w * 0.14);
+    rig.rot('rightShoulder', 0, 0, w * 0.14);
+    rig.rot('leftUpperArm', -w * 0.10, 0, w * 0.10);
+    rig.rot('rightUpperArm', -w * 0.10, 0, -w * 0.10);
+    rig.rot('chest', -w * 0.05, 0, 0);
+    rig.rot('head', -w * 0.05, 0, 0);
+  }},
+  settle: { duration: 2.2, fn: (p, amp, rig) => {
+    const w = bell(p) * amp;
+    rig.rot('leftUpperArm', w * 0.05, 0, -w * 0.05);
+    rig.rot('rightUpperArm', w * 0.05, 0, w * 0.05);
+    rig.rot('leftLowerArm', -w * 0.08, 0, 0);
+    rig.rot('rightLowerArm', -w * 0.08, 0, 0);
+  }},
+
+  /* ── hands: speaking ──────────────────────────────────────────────── */
+  beat: { duration: 1.1, fn: (p, amp, rig) => {
+    const w = throwEnv(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.18 * a, 0, s * w * 0.22 * a);
+    rig.rot(side + 'LowerArm', -w * 0.34 * a, s * w * 0.14 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.10 * a, 0, s * w * 0.16 * a);
+    rig.finger(side === 'left' ? 'left' : 'right', w * 0.35 * a);
+    rig.rot('chest', 0, -s * w * 0.020 * a, 0);
+  }},
+  openPalm: { duration: 1.9, fn: (p, amp, rig) => {
+    // "Here's the thing" — palm turned up and presented.
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.30 * a, 0, s * w * 0.30 * a);
+    rig.rot(side + 'LowerArm', -w * 0.50 * a, s * w * 0.42 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.14 * a, 0, 0);
+    rig.finger(side, w * 0.75 * a);
+    rig.spread(side, w * a);
+    rig.rot('chest', 0, -s * w * 0.025 * a, 0);
+  }},
+  bothPalms: { duration: 2.3, fn: (p, amp, rig) => {
+    // Two-handed presentation. Reads as explaining or offering.
+    const w = bell(p) * amp;
+    for (const side of ['left','right']) {
+      const s = side === 'left' ? 1 : -1;
+      rig.rot(side + 'UpperArm', -w * 0.26, 0, s * w * 0.26);
+      rig.rot(side + 'LowerArm', -w * 0.46, s * w * 0.40, 0);
+      rig.rot(side + 'Hand', -w * 0.12, 0, 0);
+      rig.finger(side, w * 0.70);
+      rig.spread(side, w * 0.8);
+    }
+    rig.rot('chest', -w * 0.02, 0, 0);
+    rig.rot('head', -w * 0.025, 0, 0);
+  }},
+  pointForward: { duration: 1.5, fn: (p, amp, rig) => {
+    const w = throwEnv(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.42 * a, 0, s * w * 0.34 * a);
+    rig.rot(side + 'LowerArm', -w * 0.42 * a, s * w * 0.20 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.06 * a, 0, 0);
+    rig.finger(side, -w * 0.45 * a);                  // close into a fist...
+    rig.finger(side, w * 1.3 * a, ['Index']);         // ...but extend the index
+    rig.rot('chest', 0, -s * w * 0.03 * a, 0);
+  }},
+  handToChest: { duration: 2.6, fn: (p, amp, rig) => {
+    // Sincerity gesture. Slow in, slow out.
+    // Reach-in depth reduced from 0.80 to 0.60 for #7 — this gesture drives
+    // the hand directly at the sternum, making it the single highest-risk
+    // gesture for clipping through a form-fitting top. The hand still
+    // clearly reads as reaching toward the chest without going as deep.
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.34 * a, 0, s * w * 0.46 * a);
+    rig.rot(side + 'LowerArm', -w * 0.30 * a, s * w * 0.60 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.20 * a, 0, -s * w * 0.10 * a);
+    rig.finger(side, w * 0.30 * a);
+    rig.rot('chest', -w * 0.02 * a, 0, 0);
+  }},
+  dismiss: { duration: 1.3, fn: (p, amp, rig) => {
+    // Small flick outward — "no", "never mind".
+    const w = throwEnv(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.14 * a, 0, s * w * 0.34 * a);
+    rig.rot(side + 'LowerArm', -w * 0.22 * a, s * w * 0.30 * a, 0);
+    rig.rot(side + 'Hand', 0, 0, -s * w * 0.32 * a);
+    rig.finger(side, w * 0.55 * a);
+    rig.spread(side, w * 0.6 * a);
+  }},
+  countOff: { duration: 2.8, fn: (p, amp, rig) => {
+    // Enumerating points — hand held up, fingers extending one at a time.
+    const w = Math.min(1, p * 4) * (p > 0.82 ? 1 - (p - 0.82) / 0.18 : 1);
+    const a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.34 * a, 0, s * w * 0.40 * a);
+    rig.rot(side + 'LowerArm', -w * 0.52 * a, s * w * 0.30 * a, 0);
+    rig.finger(side, -w * 0.5 * a);
+    const stage = clamp((p - 0.15) / 0.55, 0, 1);
+    const shown = ['Index','Middle','Ring'].slice(0, 1 + Math.floor(stage * 2.99));
+    rig.finger(side, w * 1.2 * a, shown);
+    rig.spread(side, w * 0.7 * a);
+  }},
+  smallWave: { duration: 1.8, fn: (p, amp, rig) => {
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.30 * a, 0, s * w * 0.55 * a);
+    rig.rot(side + 'LowerArm', -w * 0.30 * a, s * w * 0.30 * a, 0);
+    rig.rot(side + 'Hand', 0, 0, s * Math.sin(p * Math.PI * 6) * w * 0.26 * a);
+    rig.finger(side, w * 0.8 * a);
+    rig.spread(side, w * a);
+  }},
+
+  /* ── hands: thinking and idle self-touch ──────────────────────────── */
+  chinTouch: { duration: 3.4, fn: (p, amp, rig) => {
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.36 * a, 0, s * w * 0.62 * a);
+    rig.rot(side + 'LowerArm', -w * 0.30 * a, s * w * 1.05 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.24 * a, 0, -s * w * 0.14 * a);
+    rig.finger(side, -w * 0.30 * a);
+    rig.rot('head', w * 0.03 * a, 0, -s * w * 0.03 * a);
+  }},
+  hairTouch: { duration: 3.0, fn: (p, amp, rig) => {
+    // Unconscious self-touch. One of the strongest "alive" cues there is.
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.20 * a, 0, s * w * 0.90 * a);
+    rig.rot(side + 'LowerArm', -w * 0.24 * a, s * w * 1.15 * a, 0);
+    rig.rot(side + 'Hand', -w * 0.16 * a, 0, -s * w * 0.20 * a);
+    rig.finger(side, w * 0.40 * a);
+    rig.rot('head', 0, 0, s * w * 0.04 * a);
+  }},
+  armFidget: { duration: 2.6, fn: (p, amp, rig) => {
+    // One hand briefly touches the opposite forearm, then drops.
+    // Reach-in reduced from 0.95 to 0.72 for #7, same reasoning as
+    // handToChest — this swings the forearm directly across the torso.
+    const w = bell(p), a = Math.abs(amp);
+    const side = amp >= 0 ? 'left' : 'right', s = amp >= 0 ? 1 : -1;
+    rig.rot(side + 'UpperArm', -w * 0.14 * a, 0, s * w * 0.30 * a);
+    rig.rot(side + 'LowerArm', -w * 0.20 * a, s * w * 0.72 * a, 0);
+    rig.finger(side, -w * 0.25 * a);
+    rig.rot('chest', 0, -s * w * 0.015 * a, 0);
+  }},
+};
+
+// Which gestures fire spontaneously in each state, and how likely each is.
+const GESTURE_POOLS = {
+  idle: [
+    ['hairTouch', 2], ['armFidget', 3], ['stretch', 2], ['weightRock', 4],
+    ['scanRoom', 3], ['settle', 3], ['shrug', 1], ['torsoTwist', 2],
+  ],
+  listening: [
+    ['chinTouch', 3], ['tilt', 4], ['armFidget', 2], ['lean', 3],
+    ['weightRock', 2], ['settle', 2],
+  ],
+  thinking: [
+    ['chinTouch', 5], ['hairTouch', 2], ['glanceAway', 4], ['torsoTwist', 1],
+  ],
+  speaking: [
+    ['beat', 6], ['openPalm', 4], ['bothPalms', 2], ['pointForward', 2],
+    ['handToChest', 1], ['dismiss', 1], ['countOff', 1], ['torsoTwist', 1],
+  ],
+};
+
+function pickGesture(pool) {
+  const total = pool.reduce((s, g) => s + g[1], 0);
+  let r = Math.random() * total;
+  for (const [name, w] of pool) { r -= w; if (r <= 0) return name; }
+  return pool[0][0];
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   THE AVATAR — ties it together, owns the behaviour state machine
+   ════════════════════════════════════════════════════════════════════════ */
+class Avatar {
+  constructor(vrm) {
+    this.vrm = vrm;
+    this.rig = new Rig(vrm);
+    this.face = new Face(vrm);
+    this.blink = new Blinker(this.face);
+    this.gaze = new Gaze();
+    this.mouth = new Mouth(this.face);
+    this.gestures = new GestureLayer();
+
+    if (vrm.lookAt) vrm.lookAt.target = lookTarget;
+
+    this.state = 'idle';
+    this.stateTime = 0;
+    this.clock = 0;
+
+    // Posture springs — targets change on weight shift, springs do the rest.
+    this.postureX = new Spring(0, 3.2);
+    this.postureZ = new Spring(0, 3.2);
+    this.headTilt = new Spring(0, 4.0);
+    this.headPitch = new Spring(0, 4.0);
+    this.leanIn = new Spring(0, 3.0);
+
+    this.nextShift = rand(3, 7);
+    this.shiftT = 0;
+    this.nextNod = rand(CONFIG.nodMin, CONFIG.nodMax);
+    this.nodT = 0;
+    this.nextBeat = rand(CONFIG.gestureMin, CONFIG.gestureMax);
+    this.beatT = 0;
+    this.beatSide = 1;
+    this.ambientT = 0;
+    this.nextAmbient = rand(4, 9);
+    this.lastAmbient = null;
+  }
+
+  /**
+   * Spontaneous body/hand gesture drawn from the current state's pool.
+   *
+   * Filters the pool against what's actually playing right now, not just the
+   * last pick — the previous version only avoided repeating the immediately
+   * prior gesture, so it frequently retried a name that was already active
+   * and got silently blocked by GestureLayer's no-self-stack rule. That
+   * looked like "the debug overlay says hairTouch but nothing moved," which
+   * is exactly what was happening: the request was made and rejected in the
+   * same frame.
+   */
+  ambientGesture() {
+    const pool = GESTURE_POOLS[this.state] || GESTURE_POOLS.idle;
+    const activeNow = new Set(this.gestures.activeNames());
+    const available = pool.filter(([name]) => !activeNow.has(name));
+    const usePool = available.length ? available : pool;
+    let name = pickGesture(usePool);
+    if (name === this.lastAmbient && available.length > 1) {
+      name = pickGesture(available.filter(([n]) => n !== name));
+    }
+    this.lastAmbient = name;
+    const side = Math.random() < 0.5 ? 1 : -1;
+    // Amplitude floor raised from 0.55 to 0.75 — gestures that DO clear the
+    // concurrency cap were still sometimes too subtle to read against the
+    // rest-pose's already-bent arms.
+    const started = this.gestures.play(name, { amplitude: side * rand(0.75, 1.15) });
+    if (!started) console.warn('[avatar] ambient gesture blocked:', name,
+                               '(active:', this.gestures.activeNames().join(','), ')');
+  }
+
+  ambientInterval() {
+    if (this.state === 'speaking')  return rand(CONFIG.gestureMin, CONFIG.gestureMax);
+    if (this.state === 'listening') return rand(CONFIG.listenGestureMin, CONFIG.listenGestureMax);
+    if (this.state === 'thinking')  return rand(3.0, 6.0);
+    return rand(CONFIG.idleGestureMin, CONFIG.idleGestureMax);
+  }
+
+  setState(next) {
+    if (next === this.state) return;
+    const prev = this.state;
+    this.state = next;
+    this.stateTime = 0;
+    // A transition is a natural moment for a gesture, and re-rolling the timer
+    // stops a pending idle fidget from firing mid-sentence.
+    this.ambientT = 0;
+    this.nextAmbient = this.ambientInterval() * 0.6;
+
+    if (next === 'listening') {
+      // Attention: head comes up and forward slightly, small tilt, eyes centre.
+      this.headTilt.to(rand(-0.055, 0.055));
+      this.headPitch.to(-0.02);
+      this.leanIn.to(1);
+      this.gaze.bias = { x: 0, y: 0 };
+      this.gestures.play('nod', { amplitude: 0.7 });
+      this.nodT = 0; this.nextNod = rand(2.0, 4.0);
+    } else if (next === 'thinking') {
+      // Gaze aversion up-and-away is the single most legible "I'm processing".
+      this.headTilt.to(rand(0.03, 0.08) * (Math.random() < .5 ? -1 : 1));
+      this.headPitch.to(-0.07);
+      this.leanIn.to(0.2);
+      this.gaze.bias = { x: rand(-0.03, 0.03), y: 0.025 };
+      this.gestures.play('glanceAway', { amplitude: 1 });
+      if (Math.random() < 0.45) {
+        this.gestures.play('chinTouch', { amplitude: (Math.random() < .5 ? 1 : -1) * rand(0.7, 1) });
+      }
+    } else if (next === 'speaking') {
+      this.headTilt.to(0);
+      this.headPitch.to(0);
+      this.leanIn.to(0.55);
+      this.gaze.bias = { x: 0, y: 0 };
+      this.mouth.speaking = true;
+      this.mouth.lastViseme = performance.now();
+      this.beatT = 0; this.nextBeat = rand(0.5, 1.4);
+      // Opening a sentence with the hands already moving reads far better than
+      // hands that start dead and catch up half a second later.
+      if (Math.random() < 0.6) {
+        this.gestures.play(Math.random() < 0.5 ? 'openPalm' : 'beat',
+                           { amplitude: (Math.random() < .5 ? 1 : -1) * rand(0.6, 1) });
+      }
+    } else { // idle
+      this.headTilt.to(0);
+      this.headPitch.to(0);
+      this.leanIn.to(0);
+      this.gaze.bias = { x: 0, y: 0 };
+    }
+
+    if (prev === 'speaking' && next !== 'speaking') {
+      this.mouth.speaking = false;
+      this.mouth.silence();
+    }
+  }
+
+  update(dt) {
+    const now = performance.now();
+    this.clock += dt;
+    this.stateTime += dt;
+    const t = this.clock;
+    const rig = this.rig;
+    rig.reset();
+
+    // Safety valve for #3: if we've been "speaking" longer than any real
+    // utterance would take AND nothing has arrived recently, something on
+    // the Python side got stuck. Force idle rather than babble forever.
+    if (this.state === 'speaking' &&
+        now - this.mouth.lastViseme > CONFIG.maxSpeakingMs) {
+      console.warn('[avatar] speaking state exceeded', CONFIG.maxSpeakingMs,
+                   'ms with no viseme activity — forcing idle. This means ' +
+                   'something in speaker.py set the speaking state without ' +
+                   'ever calling speech_end()/send_speech_stop().');
+      this.setState('idle');
+    }
+
+
+    /* ---- breathing: the base layer everything else sits on -------------- */
+    // Asymmetric: inhale is quicker than exhale, which is what makes it read
+    // as breath rather than a sine wave.
+    const bp = (t * CONFIG.breathRate) % 1;
+    const breath = bp < 0.4 ? easeOut(bp / 0.4) : 1 - easeInOut((bp - 0.4) / 0.6);
+    const breathAmt = this.state === 'speaking' ? 0.55 : this.state === 'thinking' ? 1.15 : 1;
+    rig.rot('chest', -breath * 0.030 * breathAmt, 0, 0);
+    rig.rot('spine', -breath * 0.014 * breathAmt, 0, 0);
+    rig.rot('leftShoulder', 0, 0, -breath * 0.022 * breathAmt);
+    rig.rot('rightShoulder', 0, 0, breath * 0.022 * breathAmt);
+    rig.hipsOffset[1] += breath * 0.004;
+
+    /* ---- weight shifts: standing humans are never still ----------------- */
+    this.shiftT += dt;
+    if (this.shiftT >= this.nextShift) {
+      this.shiftT = 0;
+      this.nextShift = rand(CONFIG.weightShiftMin, CONFIG.weightShiftMax);
+      this.postureX.to(rand(-0.022, 0.022));
+      this.postureZ.to(rand(-0.030, 0.030));
+      if (Math.random() < 0.25) this.gestures.play('shrug', { amplitude: 0.45 });
+    }
+    const px = this.postureX.step(dt), pz = this.postureZ.step(dt);
+    rig.hipsOffset[0] += px;
+    rig.rot('hips', 0, pz * 0.6, -px * 1.4);
+    rig.rot('spine', 0, -pz * 0.35, px * 0.9);
+    rig.rot('leftUpperLeg', 0, 0, -px * 0.5);
+    rig.rot('rightUpperLeg', 0, 0, -px * 0.5);
+
+    /* ---- continuous head drift: kills the mannequin look ---------------- */
+    const driftScale = this.state === 'listening' ? 0.55 : 1;
+    rig.rot('head',
+      noise(t * 0.5, 1) * 0.020 * driftScale,
+      noise(t * 0.4, 2) * 0.032 * driftScale,
+      noise(t * 0.3, 3) * 0.016 * driftScale);
+    rig.rot('neck',
+      noise(t * 0.5, 1) * 0.010 * driftScale,
+      noise(t * 0.4, 2) * 0.016 * driftScale, 0);
+    rig.rot('chest', 0, noise(t * 0.22, 6) * 0.014, noise(t * 0.19, 7) * 0.010);
+
+    // Arms get their own slow sway so they don't hang like a coat rack.
+    const sway = noise(t * 0.27, 8);
+    rig.rot('leftUpperArm', sway * 0.018, 0, sway * 0.022);
+    rig.rot('rightUpperArm', -sway * 0.018, 0, sway * 0.022);
+    rig.rot('leftLowerArm', 0, noise(t * 0.33, 9) * 0.03, 0);
+    rig.rot('rightLowerArm', 0, noise(t * 0.31, 10) * 0.03, 0);
+    rig.rot('leftHand', noise(t * 0.41, 30) * 0.030, 0, noise(t * 0.29, 31) * 0.025);
+    rig.rot('rightHand', noise(t * 0.37, 32) * 0.030, 0, noise(t * 0.26, 33) * 0.025);
+
+    // Fingers drift very slightly open and closed. Barely visible individually,
+    // but frozen hands are one of the loudest "it's a puppet" signals.
+    rig.finger('left', noise(t * 0.34, 34) * 0.07);
+    rig.finger('right', noise(t * 0.30, 35) * 0.07);
+
+    // Knees micro-flex so the legs aren't locked columns.
+    rig.rot('leftLowerLeg', (0.5 + noise(t * 0.21, 36) * 0.5) * 0.020, 0, 0);
+    rig.rot('rightLowerLeg', (0.5 + noise(t * 0.23, 37) * 0.5) * 0.020, 0, 0);
+
+    /* ---- state-driven posture ------------------------------------------ */
+    const lean = this.leanIn.step(dt);
+    rig.rot('spine', lean * 0.045, 0, 0);
+    rig.rot('chest', lean * 0.025, 0, 0);
+    rig.hipsOffset[2] += lean * 0.010;
+    rig.rot('head', this.headPitch.step(dt), 0, this.headTilt.step(dt));
+
+    /* ---- per-state behaviour ------------------------------------------- */
+    let blinkRate = 1;
+    const overlay = {};
+
+    if (this.state === 'listening') {
+      // Active listening: furrowed, focused. `angry` at low weight is how VRM
+      // models lower the brow — it does not read as anger at 0.15.
+      overlay.angry = 0.15 + Math.max(0, noise(t * 0.6, 12)) * 0.07;
+      overlay.relaxed = 0.10;
+      blinkRate = 0.75; // people blink less when concentrating
+      this.nodT += dt;
+      if (this.nodT >= this.nextNod) {
+        this.nodT = 0;
+        this.nextNod = rand(CONFIG.nodMin, CONFIG.nodMax);
+        this.gestures.play(Math.random() < 0.4 ? 'doubleNod' : 'nod',
+                           { amplitude: rand(0.55, 1.0) });
+        if (Math.random() < 0.25) this.gestures.play('tilt', { amplitude: rand(0.4, 0.9) });
+      }
+    } else if (this.state === 'thinking') {
+      overlay.angry = 0.20;
+      overlay.sad = 0.07;
+      blinkRate = 0.55;
+      rig.rot('head', 0, 0, 0);
+    } else if (this.state === 'speaking') {
+      blinkRate = 1.15;
+      // Head emphasis proportional to mouth energy — speech and motion coupled.
+      const e = this.mouth.energy;
+      rig.rot('head', -e * 0.035 + noise(t * 2.1, 14) * e * 0.02,
+                       noise(t * 1.7, 15) * e * 0.03, 0);
+      rig.rot('chest', -e * 0.010, 0, 0);
+      overlay.surprised = e * 0.06; // tiny brow lift on emphasis
+      this.beatT += dt;
+      if (this.beatT >= this.nextBeat) {
+        this.beatT = 0;
+        this.nextBeat = rand(CONFIG.gestureMin, CONFIG.gestureMax);
+        this.beatSide *= -1;
+        // Hands lead speech: gesture amplitude tracks how energetically she's
+        // talking, so quiet passages get small hands and emphasis gets big ones.
+        const drive = 0.45 + this.mouth.energy * 0.6;
+        this.gestures.play(pickGesture(GESTURE_POOLS.speaking),
+                           { amplitude: this.beatSide * rand(0.5, 1.0) * drive });
+        if (Math.random() < 0.3) this.gestures.play('nod', { amplitude: 0.4 });
+        if (Math.random() < 0.18) this.gestures.play('tilt', { amplitude: 0.5 });
+      }
+    } else {
+      overlay.relaxed = 0.06;
+      if (this.stateTime > 6 && Math.random() < dt * 0.06) {
+        this.gestures.play('glanceAway', { amplitude: rand(0.4, 0.8) });
+      }
+    }
+
+    /* ---- spontaneous gestures, any state -------------------------------- */
+    this.ambientT += dt;
+    if (this.ambientT >= this.nextAmbient) {
+      this.ambientT = 0;
+      this.nextAmbient = this.ambientInterval();
+      this.ambientGesture();
+    }
+
+    this.face.setOverlay(overlay);
+    this.gestures.update(dt, rig);
+    rig.apply();
+
+    /* ---- face ----------------------------------------------------------- */
+    this.face.update(dt);
+    this.mouth.update(dt, now);
+    this.blink.update(dt, blinkRate);
+    this.gaze.update(dt, this.state);
+
+    // Jaw bone, if the model has one — expressions alone rarely open enough.
+    if (rig.bones.jaw) {
+      const j = rig.rest.jaw.clone();
+      const e = new THREE.Euler(this.mouth.jaw * 0.16, 0, 0);
+      rig.bones.jaw.quaternion.copy(j).multiply(new THREE.Quaternion().setFromEuler(e));
+    }
+
+    /* ---- camera: barely-there handheld drift ---------------------------- */
+    const d = CONFIG.cameraDrift;
+    if (d > 0) {
+      camera.position.set(
+        camBase.x + noise(t * 0.19, 20) * 0.012 * d,
+        camBase.y + noise(t * 0.23, 21) * 0.009 * d,
+        camBase.z + noise(t * 0.13, 22) * 0.010 * d
+      );
+      camera.lookAt(0, camTargetY + noise(t * 0.17, 23) * 0.006 * d, 0);
+    }
+
+    this.vrm.update(dt); // drives lookAt, expressions, spring bones (hair/cloth)
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   LOAD
+   ════════════════════════════════════════════════════════════════════════ */
+let avatar = null;
+const boot = document.getElementById('boot');
+
+const loader = new GLTFLoader();
+loader.register(parser => new VRMLoaderPlugin(parser));
+loader.load(
+  CONFIG.modelPath,
+  gltf => {
+    const vrm = gltf.userData.vrm;
+    try { VRMUtils.removeUnnecessaryVertices(gltf.scene); } catch (e) {}
+    try { VRMUtils.combineSkeletons(gltf.scene); } catch (e) {}
+    try { VRMUtils.rotateVRM0(vrm); } catch (e) {}   // no-op for VRM 1.0
+    vrm.scene.traverse(o => { o.frustumCulled = false; });
+
+    scene.add(vrm.scene);
+    measureModel(vrm);
+    frameCamera();
+    avatar = new Avatar(vrm);
+    boot.classList.add('hidden');
+    setTimeout(() => boot.remove(), 700);
+    dbg.model = `${modelHeight.toFixed(2)}m / ${avatar.face.available.size} expr`;
+  },
+  p => { if (p.total) boot.textContent = `LOADING ${Math.round(p.loaded / p.total * 100)}%`; },
+  err => {
+    console.error(err);
+    boot.textContent = 'MODEL FAILED TO LOAD — check Raziel-1.vrm is beside avatar.html';
+  }
+);
+
+/* ════════════════════════════════════════════════════════════════════════
+   WEBSOCKET
+   ════════════════════════════════════════════════════════════════════════ */
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const dbg = { fps: 0, state: 'idle', link: 'down', last: '—', model: '—' };
+
+let ws = null, reconnectTimer = null;
+
+function connect() {
+  clearTimeout(reconnectTimer);
+  try { ws = new WebSocket(CONFIG.wsUrl); } catch (e) { scheduleReconnect(); return; }
+
+  ws.onopen = () => {
+    dbg.link = 'up';
+    statusEl.dataset.link = 'up';
+    statusText.textContent = dbg.state;
+    try { ws.send(JSON.stringify({ type: 'hello', client: 'avatar', ready: true })); } catch (e) {}
+  };
+  ws.onclose = () => { dbg.link = 'down'; statusEl.dataset.link = 'down'; statusText.textContent = 'reconnecting'; scheduleReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    handle(msg);
+  };
+}
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, CONFIG.reconnectMs);
+}
+
+// Tolerant of a few shapes, so it keeps working if the Python side drifts.
+function handle(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  dbg.last = JSON.stringify(msg).slice(0, 60);
+  const type = msg.type || (msg.viseme ? 'viseme' : msg.state ? 'state' : msg.emotion ? 'emotion' : null);
+
+  switch (type) {
+    case 'state':
+      setState(msg.state || msg.value);
+      break;
+    case 'emotion':
+      avatar?.face.setEmotion(msg.emotion || msg.name || msg.value, msg.intensity ?? 1);
+      break;
+    case 'viseme':
+      avatar?.mouth.setViseme(msg.viseme || msg.value, msg.weight ?? 1, msg.duration ?? 0.09);
+      break;
+    case 'visemes': {
+      const seq = msg.sequence || msg.visemes || [];
+      const t0 = performance.now();
+      for (const item of seq) {
+        const at = (item.t ?? item.time ?? 0) * 1000;
+        setTimeout(() => avatar?.mouth.setViseme(item.v || item.viseme,
+                                                 item.w ?? 1,
+                                                 item.d ?? item.duration ?? 0.09),
+                   Math.max(0, at - (performance.now() - t0)));
+      }
+      break;
+    }
+    case 'level':
+      if (avatar) avatar.mouth.level = clamp(msg.value ?? 0, 0, 1);
+      break;
+    case 'speech_start': setState('speaking'); break;
+    case 'speech_end':   setState(msg.next || 'idle'); break;
+    case 'gesture':      avatar?.gestures.play(msg.name, { amplitude: msg.amplitude ?? 1 }); break;
+    case 'framing':      setFraming(msg.mode || msg.value); break;
+    case 'blink':        avatar?.blink.blinkNow(!!msg.double); break;
+    case 'config':       Object.assign(CONFIG, msg.values || {}); frameCamera(); break;
+  }
+}
+
+function setState(s) {
+  if (!['idle','listening','thinking','speaking'].includes(s)) return;
+  dbg.state = s;
+  statusEl.dataset.state = s;
+  if (statusEl.dataset.link === 'up') statusText.textContent = s;
+  avatar?.setState(s);
+}
+
+connect();
+
+/* ════════════════════════════════════════════════════════════════════════
+   KEYBOARD — for testing without the Python side running
+   ════════════════════════════════════════════════════════════════════════ */
+const debugEl = document.getElementById('debug');
+let selfTest = null;
+
+addEventListener('keydown', e => {
+  switch (e.key) {
+    case '1': setFraming('full'); break;
+    case '2': setFraming('upper'); break;
+    case '3': setFraming('face'); break;
+    case 'd': debugEl.classList.toggle('on'); break;
+    case 'i': setState('idle'); break;
+    case 'l': setState('listening'); break;
+    case 'k': setState('thinking'); break;
+    case 's': setState('speaking'); break;
+    case 'e': {
+      const names = Object.keys(EMOTIONS);
+      avatar?.face.setEmotion(names[Math.floor(Math.random() * names.length)], 1);
+      break;
+    }
+    case 't': toggleSelfTest(); break;
+    case 'g': avatar?.ambientGesture(); break;         // random gesture for this state
+    case 'G': {                                        // walk the whole library
+      const names = Object.keys(GESTURES);
+      gestureIndex = (gestureIndex + 1) % names.length;
+      const n = names[gestureIndex];
+      avatar?.gestures.clear();
+      avatar?.gestures.play(n, { amplitude: 1 });
+      dbg.last = 'gesture: ' + n;
+      break;
+    }
+    case '[': CONFIG.gestureScale = Math.max(0, +(CONFIG.gestureScale - 0.1).toFixed(2)); break;
+    case ']': CONFIG.gestureScale = Math.min(2, +(CONFIG.gestureScale + 0.1).toFixed(2)); break;
+  }
+});
+let gestureIndex = -1;
+
+// Cycles through every state with fake visemes — verifies the whole visual
+// pipeline with no Python running.
+function toggleSelfTest() {
+  if (selfTest) { clearInterval(selfTest.a); clearInterval(selfTest.b); selfTest = null; setState('idle'); return; }
+  const seq = ['listening','thinking','speaking','idle'];
+  let i = 0;
+  setState(seq[0]);
+  const a = setInterval(() => { i = (i + 1) % seq.length; setState(seq[i]); }, 6000);
+  const b = setInterval(() => {
+    if (dbg.state === 'speaking' && avatar) {
+      avatar.mouth.setViseme(VISEMES[Math.floor(Math.random() * VISEMES.length)], rand(0.5, 1), 0.1);
+    }
+  }, 95);
+  selfTest = { a, b };
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   LOOP
+   ════════════════════════════════════════════════════════════════════════ */
+const clock = new THREE.Clock();
+let frames = 0, fpsTimer = 0;
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (avatar) avatar.update(dt);
+  renderer.render(scene, camera);
+
+  frames++; fpsTimer += dt;
+  if (fpsTimer >= 0.5) {
+    dbg.fps = Math.round(frames / fpsTimer); frames = 0; fpsTimer = 0;
+    if (debugEl.classList.contains('on')) {
+      debugEl.textContent =
+        `fps    ${dbg.fps}\nstate  ${dbg.state}\nlink   ${dbg.link}\n` +
+        `frame  ${CONFIG.framing}\nmodel  ${dbg.model}\n` +
+        `gscale ${CONFIG.gestureScale.toFixed(2)}\n` +
+        `active ${(avatar?.gestures.active.map(a => a.name).join(',')) || '—'}\n` +
+        `msg    ${dbg.last}`;
+    }
+  }
+}
+tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+openwakeword==0.6.0
+onnxruntime==1.18.1
+pyaudio==0.2.14
+faster-whisper==1.0.3
+piper-tts==1.8.0
+numpy==1.26.4
+ollama==0.6.2
+ddgs==9.16.0
+Pillow==10.4.0
+pyautogui==0.9.54
+spotipy==2.26.0
+pywebview==5.3.2
+websockets==13.1
+
+# --- v3 (Raziel features). Optional but recommended: each one only enables its own feature. ---
+pycaw>=20240210
+comtypes>=1.4
+screen-brightness-control>=0.24
+psutil>=5.9

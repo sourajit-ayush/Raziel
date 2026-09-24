@@ -1,0 +1,43 @@
+### Raziel voice assistant — files that must never be pushed to GitHub ###
+
+# --- Secrets: API keys, tokens, phone numbers ---
+config.py
+google_credentials.json
+google_token.json
+.spotify_cache
+
+# --- Personal data / runtime state ---
+memory.db
+assistant.log
+*.log
+temp_recording.wav
+generated_files/
+screenshots/
+my_voice/
+avatar_transparency.json
+
+# --- Large binary models (over/near GitHub's 100MB file limit, and not code) ---
+*.onnx
+*.onnx.json
+*.vrm
+
+# --- Python environment (regenerate with requirements.txt) ---
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# --- Backups made during earlier dev sessions, and old test bundles ---
+_backup_before_*/
+tests_v3.zip
+
+# --- Local working notes - not part of the app itself ---
+Claude outputs/
+
+# --- OS/editor noise ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
