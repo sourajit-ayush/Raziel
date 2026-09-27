@@ -59,6 +59,7 @@ from tools import (
     try_auto_datetime,
     try_auto_open_app,
     try_auto_open_site_action,
+    try_auto_type_into_ai_site,
     try_auto_play_music,
     try_auto_queue_music,
     try_auto_whatsapp,
@@ -284,6 +285,7 @@ DETERMINISTIC_MATCHERS = (
     ("reminders", _lazy("reminders"), True),                 # timers / alarms / reminders (+ "at what time?" follow-up)
     ("favorite-fact", _favorite_reply, True),
     ("open-site-action", try_auto_open_site_action, True),   # "open youtube and play X"
+    ("open-ai-chat", try_auto_type_into_ai_site, True),       # "open chatgpt and type/ask X"
     ("queue-music", try_auto_queue_music, True),             # "add X to the queue"
     ("whatsapp", try_auto_whatsapp, True),                   # "message Fazal saying hi" (asks yes/no first)
     ("calendar-mail", _lazy("google_api"), True),            # Google Calendar / Gmail

@@ -244,3 +244,12 @@ PHONE_BRIDGE_TOKEN = ""              # REQUIRED to start the server - generate w
                                       #   py -c "import secrets; print(secrets.token_hex(32))"
 JOIN_API_KEY = ""
 JOIN_DEVICE_ID = ""
+
+# --- Typing into AI chat websites (ChatGPT, Gemini, Claude, Perplexity, Copilot) ------------------
+# "open chatgpt and type/ask <question>" opens the site (or its installed app, same as "open X")
+# and types the question into its message box once the window actually has the keyboard focus -
+# see tools.type_into_ai_site(). If it keeps saying the site "never came to the front", raise
+# AI_CHAT_FOCUS_TIMEOUT (a slow PC/browser can need longer); if it types before the page is ready,
+# raise AI_CHAT_TYPE_DELAY.
+AI_CHAT_FOCUS_TIMEOUT = 15   # seconds to wait for the site to get keyboard focus before giving up
+AI_CHAT_TYPE_DELAY = 3       # extra seconds after focus, for the page to finish loading its message box

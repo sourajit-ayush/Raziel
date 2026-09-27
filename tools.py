@@ -116,6 +116,11 @@ WEBSITE_URLS = {
     "x": "https://twitter.com",
     "whatsapp web": "https://web.whatsapp.com",
     "chatgpt": "https://chat.openai.com",
+    "chat gpt": "https://chat.openai.com",
+    "gemini": "https://gemini.google.com",
+    "claude": "https://claude.ai",
+    "perplexity": "https://www.perplexity.ai",
+    "copilot": "https://copilot.microsoft.com",
     "netflix": "https://netflix.com",
 }
 
@@ -126,7 +131,7 @@ WEBSITE_URLS = {
 # "open YouTube" opens an actual YouTube window instead of always forcing a browser tab.
 # Deliberately NOT applied to every entry above - a short key like "x" would too easily
 # loose-match some unrelated installed app (Xbox, Excel, ...) that has nothing to do with it.
-APP_PREFERRED_WEBSITES = {"youtube", "netflix", "chatgpt"}
+APP_PREFERRED_WEBSITES = {"youtube", "netflix", "chatgpt", "chat gpt", "gemini", "claude", "perplexity", "copilot"}
 
 # URL templates for sites that support searching directly via the URL, so
 # "open X and search for Y" can actually perform the search instead of
@@ -1742,6 +1747,101 @@ dictation_control = _feature("dictation", "dictation_control")
 control_phone = _feature("phone_control", "control_phone")
 
 
+# --- Typing into an AI chat website (ChatGPT, Gemini, Claude, ...) ------------
+# Bug report: "open chatgpt and type X" opened ChatGPT and stopped there - there was no
+# code path that actually typed anything into it, and the LLM had no tool for this either,
+# so it either did nothing more or made something up. This actually does it: opens the site
+# (reusing open_app's real-app-first / website-fallback logic), waits for it to genuinely
+# get the keyboard focus, then types the message with winutil.type_text (real Unicode key
+# events, so this works for Hindi too) and presses Enter to submit.
+#
+# Each site maps to the word(s) its browser tab / installed-app window title reliably
+# contains, so a real OS-level keypress never goes to the wrong window while the page is
+# still loading. The deterministic "open SITE and type/ask X" phrase matcher that calls
+# this lives further down, next to the similar open-site-and-search matcher.
+AI_CHAT_SITES = {
+    "chatgpt": ("chatgpt", "openai"),
+    "chat gpt": ("chatgpt", "openai"),
+    "gemini": ("gemini",),
+    "claude": ("claude",),
+    "perplexity": ("perplexity",),
+    "copilot": ("copilot",),
+}
+
+
+def _wait_for_site_focus(keywords, timeout: float):
+    """Waits until a window whose title contains one of `keywords` (case-insensitive)
+    has the keyboard focus. True = it does, False = it never did within `timeout`
+    seconds, None = can't tell on this system (not Windows)."""
+    try:
+        import winutil
+    except Exception:                          # noqa: BLE001
+        return None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            title = str(winutil.foreground_window().get("title") or "")
+        except OSError:
+            return None
+        if any(k in title.lower() for k in keywords):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.4)
+
+
+def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
+    """Opens an AI chat site (ChatGPT, Gemini, Claude, ...) - or its installed app, if
+    one is found, same preference order as open_app - waits for it to get the keyboard
+    focus, then types `message` into it and presses Enter to submit. These sites all
+    auto-focus their message box on load, so nothing needs to be clicked first."""
+    key = site.strip().lower()
+    if key not in AI_CHAT_SITES:
+        known = ", ".join(sorted({"chatgpt", "gemini", "claude", "perplexity", "copilot"}))
+        return f"I don't know how to type into {site or 'that'} yet. I can do this for: {known}."
+    message = (message or "").strip()
+    if not message:
+        return f"What should I type into {site}?"
+
+    try:
+        import winutil
+    except Exception:                          # noqa: BLE001
+        logger.exception("winutil not available - can't type into %s", key)
+        return _t("feature_missing")
+
+    logger.info("Opening %s to type into it", key)
+    open_app(key)  # reuses open_app's real-app-first / website-fallback resolution
+
+    keywords = AI_CHAT_SITES[key]
+    timeout = float(getattr(config, "AI_CHAT_FOCUS_TIMEOUT", 15))
+    front = _wait_for_site_focus(keywords, timeout)
+    if front is False:
+        logger.error("%s never came to the front within %ss - not typing", key, timeout)
+        return (f"I opened {site}, but it never came to the front, so I didn't type "
+                f"anything - switch to it and ask me again.")
+
+    # The page itself needs a moment to load and render its message box, even once the
+    # browser/app window has focus - don't touch the keyboard/mouse during this window,
+    # since a real OS-level keypress goes to whatever has focus.
+    time.sleep(float(getattr(config, "AI_CHAT_TYPE_DELAY", 3)))
+    if front is not None and _wait_for_site_focus(keywords, 0) is False:
+        logger.error("Focus left %s while the page was loading - not typing", key)
+        return f"I opened {site}, but another window took the focus while it was loading, so I didn't type anything."
+
+    try:
+        winutil.type_text(message)
+        winutil.tap_key(winutil.VK_RETURN)
+    except OSError as e:
+        logger.warning("Couldn't type into %s: %s", key, e)
+        if "windows only" in str(e).lower():
+            return "Typing into a website only works on Windows."
+        return (f"I opened {site}, but Windows blocked the keystrokes (probably because "
+                f"something there is running as administrator), so I didn't finish typing.")
+
+    logger.info("Typed into %s: %r", key, message)
+    return f"Typed that into {site}."
+
+
 def _schema(name: str, description: str, properties=None, required=()):
     """One tool schema, written compactly (every schema is re-read by the model on every request, so
     the wording here is kept short on purpose)."""
@@ -1804,6 +1904,12 @@ _V3_SCHEMAS = [
              "app_name": "App to open, for open_app.",
              "url": "Link to open, for open_url, or text to copy, for clipboard."},
             ["action"]),
+    _schema("type_into_ai_site",
+            "Opens an AI chat website (or its installed app) and types a message into it, e.g. "
+            "'open chatgpt and ask it what time zone is UTC' or 'open gemini and type summarize this'.",
+            {"site": "chatgpt, gemini, claude, perplexity or copilot.",
+             "message": "The exact text to type into it."},
+            ["site", "message"]),
 ]
 
 
@@ -2184,6 +2290,7 @@ TOOL_FUNCTIONS = {
     "daily_briefing": daily_briefing,
     "dictation_control": dictation_control,
     "control_phone": control_phone,
+    "type_into_ai_site": type_into_ai_site,
 }
 
 # Exact-phrase shortcuts for common, unambiguous Spotify controls. Checked
@@ -2340,6 +2447,42 @@ def try_auto_open_site_action(transcript: str):
     if site == "spotify":
         return play_music(query)
     return open_website_search(site, query, play=play)
+
+
+# --- Deterministic "open AI_SITE and type/ask X" handling ---------------------
+# Matches the phrase in code and calls type_into_ai_site (defined earlier, alongside the
+# other v3 tool implementations) directly, before anything reaches the LLM - same reasoning
+# as try_auto_open_site_action just above: relying on the LLM to pick the right tool for
+# this exact phrasing proved unreliable.
+
+_AI_CHAT_ACTION_RE = re.compile(
+    r"^open (chatgpt|chat gpt|gemini|claude|perplexity|copilot) and "
+    r"(?:type|ask(?: it)?|say|tell it|write)(?:\s+that)?\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def try_auto_type_into_ai_site(transcript: str):
+    """If transcript matches 'open SITE and type/ask X' for a known AI chat site,
+    handles it deterministically and returns the result, else returns None.
+
+    Deliberately does NOT rstrip trailing '.!?' the way the other deterministic
+    matchers above do: there, the trailing punctuation sits after a short keyword
+    (a search term, an app name) and stripping it is harmless or even helpful. Here
+    the captured group is the user's actual message to type - often a spoken
+    question - so a trailing '?' is part of what they want typed, not noise to
+    discard. The message group is "(.+)$" anchored to the true end of the string
+    either way, so skipping the rstrip only changes what ends up IN that group."""
+    text = _strip_filler_prefix(transcript.strip())
+    m = _AI_CHAT_ACTION_RE.match(text)
+    if not m:
+        return None
+    site = m.group(1).strip().lower()
+    message = m.group(2).strip()
+    if not message:
+        return None
+    logger.info("Deterministic AI-chat-site request matched: site=%s message=%r", site, message)
+    return type_into_ai_site(site, message)
 
 
 # --- Deterministic "add X to the queue" handling ------------------------------

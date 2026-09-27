@@ -250,6 +250,16 @@ Backups of every replaced file: `_backup_before_phase5features\`.
   `control_phone` tool. New config: `PHONE_BRIDGE_ENABLED/PORT/TOKEN`, `JOIN_API_KEY/DEVICE_ID`.
   See `PHONE_BRIDGE_SETUP.md` for the phone-side setup (Tailscale + Tasker + Join) - the
   phone-side steps are still pending on the real device.
+- **Bugfix (2026-09-27):** "Open chatgpt/gemini/claude/... and type/ask X" now actually types X
+  into the site instead of just opening it and stopping. New `tools.type_into_ai_site()` (opens
+  the site or its installed app via `open_app()`, waits for it to really get keyboard focus, then
+  types with `winutil.type_text()` and presses Enter) plus a deterministic `"open-ai-chat"` phrase
+  matcher, right after `"open-site-action"` in `main.DETERMINISTIC_MATCHERS`. Gemini, Claude,
+  Perplexity and Copilot were also added to `WEBSITE_URLS`/`APP_PREFERRED_WEBSITES` (ChatGPT
+  already had website support; now all five try their installed app first, same as YouTube/
+  Netflix). New config: `AI_CHAT_FOCUS_TIMEOUT`/`AI_CHAT_TYPE_DELAY`. See `BUGFIX_2026-09-27.md`
+  for the full write-up. Delivered and verified on the device; full test suite (27 files) plus a
+  new dedicated `test_ai_chat_site.py` all pass with 0 failures.
 
 ## Working agreement for AI coding sessions
 - At the start of every session, read this file and the existing code before
