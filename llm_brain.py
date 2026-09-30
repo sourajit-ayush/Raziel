@@ -45,6 +45,71 @@ _UNTRUSTED_REFUSAL = {"msg": {
     "hi": "मैं कॉपी किए गए टेक्स्ट में लिखे आदेश नहीं चलाऊँगी।"}}
 
 
+# The model's reply when it did nothing: a bare acknowledgement ("Understood.") - to background chatter or a
+# half-heard command - or a claim that it did something without calling any tool ("Understood. Playing
+# music." for "any music"). Neither may be spoken as if something happened.
+# "(nothing)": what the persona asks for when the words aren't a request for her.
+_NOTHING_SENTENCE_RE = re.compile(r"^\W*(?:\(?\s*nothing\s*\)?|\(?\s*no reply\s*\)?)\W*$", re.IGNORECASE)
+# The old persona's stock acknowledgements, still in the model's habits: said to background talk and to
+# commands it then didn't carry out ("lock my laptop" -> "Understood."). Asked once more what it meant.
+_ACK_SENTENCE_RE = re.compile(
+    r"^\W*(?:understood|acknowledged|copy that|roger(?: that)?|affirmative|standing by|"
+    r"processing(?: (?:your |the )?request)?)\W*$", re.IGNORECASE)
+_CLAIM_RE = re.compile(
+    r"^\W*(?:(?:understood|acknowledged|okay|ok|sure|alright|right|done)[.,!]?\s+)?"
+    r"(?:(?:i(?:'m| am|'ve| have|'ll| will)|now)\s+)*"
+    r"(?:playing|opening|opened|launching|launched|starting|started|locking|locked|closing|closed|pausing|"
+    r"paused|resuming|resumed|skipping|skipped|setting|turning|turned|muting|muted|unmuting|typing|typed|"
+    r"sending|sent|searching|shutting|restarting|putting|moving|becoming|switching|switched|lowering|raising|"
+    r"increasing|decreasing|adding|added|deleting|deleted|creating|created|saving|saved|done)\b"
+    # ...not "Opening hours are 9 to 5." / "Starting salary is ..." / "Saved passwords are in Chrome."
+    r"(?!\s+(?:\w+\s+)?(?:is|are|was|were|hours?)\b)",
+    re.IGNORECASE)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_NO_TOOL_NUDGE = ("You wrote that you did something, but you did not call any tool, so nothing happened. "
+                  "If the user asked for an action, call the right tool now. If you cannot do it, say so "
+                  "plainly. Do not claim you did anything.")
+_ACK_NUDGE = ("You only acknowledged, and nothing was done. If the user asked you to do something, call the "
+              "right tool now. If they told you something or asked how you work, answer in a few words. If "
+              "the words were not meant for you, reply with exactly: (nothing)")
+_NOTHING_DONE = {"en": "I didn't manage to do that. Could you say it again?",
+                 "hi": "मैं वह नहीं कर पाई। क्या आप फिर से कहेंगे?"}
+
+
+def _is_idle_sentence(sentence: str) -> bool:
+    return bool(_NOTHING_SENTENCE_RE.match(sentence or "") or _ACK_SENTENCE_RE.match(sentence or ""))
+
+
+def is_bare_ack(text: str) -> bool:
+    """Only "Understood." / "Acknowledged." (no "(nothing)", no answer)."""
+    parts = [p for p in _SENTENCE_SPLIT_RE.split((text or "").strip()) if p.strip()]
+    return bool(parts) and all(_ACK_SENTENCE_RE.match(p) for p in parts)
+
+
+def _is_claim(sentence: str) -> bool:
+    """A short "Playing music." / "Opening Spotify now." (an explanation that starts with such a word is longer)."""
+    return bool(_CLAIM_RE.match(sentence or "")) and len((sentence or "").split()) <= 8
+
+
+def is_idle_reply(text: str) -> bool:
+    parts = [p for p in _SENTENCE_SPLIT_RE.split((text or "").strip()) if p.strip()]
+    return not parts or all(_is_idle_sentence(p) for p in parts)
+
+
+def claims_action(text: str) -> bool:
+    if len((text or "").split()) > 16:
+        return False
+    return any(_is_claim(p) for p in _SENTENCE_SPLIT_RE.split((text or "").strip()) if p.strip())
+
+
+# Putting the PC to sleep / shutting it down / restarting it from the model only when the user said which
+# machine: "go back to sleep" (meant for HER) once put the laptop to sleep.
+_PC_NAMED_RE = re.compile(r"\b(?:computer|pc|laptop|system|machine|windows|desktop)\b|"
+                          r"(?:कंप्यूटर|कम्प्यूटर|पीसी|लैपटॉप|सिस्टम)",       # (\b fails after a vowel sign)
+                          re.IGNORECASE)
+_PC_POWER_ACTIONS = {"sleep", "shutdown", "shut_down", "restart", "hibernate", "reboot"}
+
+
 def _strip_thinking(text: str) -> str:
     return _THINK_TAG_RE.sub("", text).strip()
 
@@ -64,9 +129,13 @@ BASE_SYSTEM_PROMPT = (
     "'Probability of precipitation is high' rather than 'I think it might "
     "rain'; say 'Battery level is at twelve percent' rather than 'looks "
     "like your battery's getting low'. "
-    "When acknowledging a command, use short, cool acknowledgments - "
-    "'Understood.', 'Acknowledged.', 'Processing request.' - never "
-    "enthusiastic phrasing like 'Okay, I'll do that right now!'. "
+    "When you carry out a command, confirm it in a few words saying what "
+    "was done ('Opening Spotify.') - never enthusiastic phrasing like 'Okay, "
+    "I'll do that right now!'. Never say you did something (playing, "
+    "opening, locking...) unless you called the tool for it in this turn. "
+    "The microphone also hears other people and the TV: if the words are not "
+    "a request or a question for you (someone else's conversation, a "
+    "fragment you can't act on), reply with exactly: (nothing) "
     "Be concise. Do not add pleasantries, small talk, or offers of further "
     "help unless directly relevant. Answer in one or two short sentences "
     "unless the user explicitly asks for detail, a list, or a story. "
@@ -332,6 +401,8 @@ class Brain:
         self.client = ollama.Client(host=config.OLLAMA_HOST)
         memory.init_db()
         self.session_id = None
+        self.last_turn_idle = False
+        self.tool_listener = None        # called with the names of the tools each turn ran      # the last turn found nothing to do (main.py decides what to say)
         self.reset()
 
     def reset(self):
@@ -491,6 +562,17 @@ class Brain:
             called_tool_names.append(func_name)
 
             func = TOOL_FUNCTIONS.get(func_name)
+            action = str((func_args or {}).get("action", "")).strip().lower() if isinstance(func_args, dict) else ""
+            if func_name == "system_control" and action in _PC_POWER_ACTIONS and \
+                    not _PC_NAMED_RE.search(getattr(self, "_last_user_text", "") or ""):
+                logger.warning("Refused system_control(%s): the user didn't name the computer", action)
+                result = ("Not done: the user did not mention the computer. If they wanted YOU to stop "
+                          "listening, tell them to say 'go to sleep'.")
+                self._final_flags.append(False)
+                results.append(result)
+                self.messages.append({"role": "tool", "content": result, "tool_name": func_name})
+                logger.info("Tool result: %s", result)
+                continue
             if getattr(self, "_turn_untrusted", False):
                 # The model is reading text nobody vouched for (the clipboard, ...). Whatever that text says,
                 # it cannot make her do anything: no tool runs during such a turn.
@@ -516,6 +598,12 @@ class Brain:
             self.messages.append(
                 {"role": "tool", "content": str(result), "tool_name": func_name}
             )
+        listener = getattr(self, "tool_listener", None)
+        if callable(listener) and called_tool_names:
+            try:
+                listener(list(called_tool_names))       # (universes.py: which being's galaxy lights up)
+            except Exception:  # noqa: BLE001
+                logger.debug("tool listener failed", exc_info=True)
         return results, called_tool_names
 
     def _needs_synthesis(self, called_tool_names) -> bool:
@@ -537,38 +625,66 @@ class Brain:
     # ---------------------------------------------------------------- one turn
 
     def _begin_turn(self, user_text: str, model_text: str = None, allow_tools: bool = True,
-                    untrusted: bool = False):
+                    untrusted: bool = False, being: str = None):
         """`user_text` is what the user said (saved in the transcript); `model_text`, when given, is what
-        the model reads instead (e.g. "summarize this text: ..." built by a matcher from the clipboard)."""
+        the model reads instead (e.g. "summarize this text: ..." built by a matcher from the clipboard).
+        `being`: one of the beings of her universe was named ("Melody, ..."): it answers in its own style and
+        is told which tools are its own (universes.py). The tool list itself never changes: it sits at the
+        start of the request, which Ollama keeps cached - a different list would be read again (10+ s)."""
+        self._turn_schemas, hint = TOOL_SCHEMAS, ""
+        if being:
+            try:
+                import universes
+                hint = universes.persona_hint(being)
+            except Exception:  # noqa: BLE001
+                logger.exception("universes: couldn't prepare %s's turn", being)
         self._turn_tools = bool(allow_tools)
         self._turn_untrusted = bool(untrusted)     # tools stay in the request (Ollama's cache) but never run
+        self._last_user_text = user_text or ""
+        self.last_turn_idle = False
         content = model_text if model_text else user_text
         if lang.is_hindi():
             # The system prompt (and so Ollama's prompt cache) must never change between turns, so the
             # language hint travels with the user's message instead; it is not saved in the transcript.
             content = f"{content}\n[Reply in Hindi, in Devanagari script.]"
+        if hint:
+            content = f"{content}\n{hint}"
         self.messages.append({"role": "user", "content": content})
         memory.append_to_session(self.session_id, "user", user_text)
         self._trim_history()
 
+    def _may_retry(self) -> bool:
+        return bool(getattr(self, "_turn_tools", True)) and not getattr(self, "_turn_untrusted", False)
+
+    def _idle_turn(self):
+        """Nothing to do in what was heard (background talk, half a sentence): it leaves no trace in the
+        conversation - a "(nothing)" in the history would teach the model to answer real requests so."""
+        self.last_turn_idle = True
+        if self.messages and self.messages[-1].get("role") == "user":
+            self.messages.pop()
+
     def process_turn(self, user_text: str, model_text: str = None, allow_tools: bool = True,
-                     untrusted: bool = False) -> str:
+                     untrusted: bool = False, being: str = None) -> str:
         """
         Sends the user's message to the model, executes any tool calls it
         requests, and returns the final natural-language reply. (Blocking:
         nothing is available until the whole reply is done. stream_turn() is
         the version that lets speech start early.)
         """
-        self._begin_turn(user_text, model_text, allow_tools, untrusted)
-        return self._respond_blocking()
+        self._begin_turn(user_text, model_text, allow_tools, untrusted, being)
+        reply = self._respond_blocking()
+        if not reply and self.last_turn_idle:
+            return lang.tr({"m": {"en": "Sorry, I didn't catch what you want me to do.",
+                                  "hi": "माफ़ कीजिए, मैं समझ नहीं पाई कि क्या करना है।"}}, "m")
+        return reply
 
-    def _respond_blocking(self) -> str:
+    def _respond_blocking(self, _retry: bool = True) -> str:
         started = time.time()
         try:
             response = self.client.chat(
                 model=config.OLLAMA_MODEL,
                 messages=self.messages,
-                **({"tools": TOOL_SCHEMAS} if getattr(self, "_turn_tools", True) else {}),
+                **({"tools": getattr(self, "_turn_schemas", TOOL_SCHEMAS)} if getattr(self, "_turn_tools", True) else {}),
                 think=config.OLLAMA_ENABLE_THINKING,
                 options=self._chat_options(),
                 keep_alive=config.OLLAMA_KEEP_ALIVE,
@@ -586,8 +702,26 @@ class Brain:
 
         if not tool_calls:
             reply = _strip_thinking(message.get("content", ""))
+            nudge = _NO_TOOL_NUDGE if claims_action(reply) else (_ACK_NUDGE if is_bare_ack(reply) else None)
+            if nudge and _retry and self._may_retry():
+                logger.warning("The model said %r without calling a tool - asking it once more", reply)
+                mark = len(self.messages)
+                self.messages.append({"role": "assistant", "content": reply})
+                self.messages.append({"role": "system", "content": nudge})
+                try:
+                    again = self._respond_blocking(_retry=False)
+                finally:
+                    del self.messages[mark:mark + 2]          # (the nudge is not part of the conversation)
+                if self.last_turn_idle and self.messages and self.messages[-1].get("role") == "user":
+                    self.messages.pop()                       # (nothing to do: no trace, see _idle_turn)
+                return again
+            if claims_action(reply):
+                reply = lang.tr({"m": _NOTHING_DONE}, "m")
+            elif is_idle_reply(reply):
+                self._idle_turn()
+                return self._finish_turn("")
             self.messages.append({"role": "assistant", "content": reply})
-            return self._finish_turn(reply or "Acknowledged.")
+            return self._finish_turn(reply)
 
         # Model wants to use one or more tools - execute them.
         self.messages.append(message)
@@ -643,7 +777,7 @@ class Brain:
             stream=True,
         )
         if use_tools and getattr(self, "_turn_tools", True):
-            kwargs["tools"] = TOOL_SCHEMAS
+            kwargs["tools"] = getattr(self, "_turn_schemas", TOOL_SCHEMAS)
 
         stream = self.client.chat(**kwargs)
         splitter = _SentenceSplitter()
@@ -694,8 +828,35 @@ class Brain:
         self._log_timing(last, "stream", started)
         return "".join(full).strip(), tool_calls
 
+    def _stream_held(self, use_tools: bool, spoken: list):
+        """_stream_once(), but a reply that so far is only an acknowledgement or a claim ("Understood.",
+        "Playing music.") is HELD back until the model finishes: if it called no tool, that must not be
+        spoken as if something happened. As soon as a real sentence comes, everything streams as before.
+        Returns (content, tool_calls, held) - `held` is what was never yielded ([] once streaming began)."""
+        scratch, held, streaming, claimed = [], [], False, False
+        gen = self._stream_once(use_tools, scratch)
+        try:
+            while True:
+                sentence = next(gen)
+                if not streaming and (claimed or _is_idle_sentence(sentence) or _is_claim(sentence)):
+                    # (after a claim everything waits: "Playing music. Enjoy!" must not be half spoken)
+                    claimed = claimed or _is_claim(sentence)
+                    held.append(sentence)
+                    continue
+                if not streaming:
+                    streaming = True
+                    for h in held:
+                        spoken.append(h)
+                        yield h
+                    held = []
+                spoken.append(sentence)
+                yield sentence
+        except StopIteration as stop:
+            content, tool_calls = stop.value if stop.value else ("", [])
+        return content, tool_calls, held
+
     def stream_turn(self, user_text: str, model_text: str = None, allow_tools: bool = True,
-                    untrusted: bool = False):
+                    untrusted: bool = False, being: str = None):
         """
         Like process_turn(), but a generator that yields the reply sentence by
         sentence AS THE MODEL WRITES IT, so speech starts after the first
@@ -704,12 +865,40 @@ class Brain:
         stops early (the user barged in), whatever was already produced is kept
         in the conversation history.
         """
-        self._begin_turn(user_text, model_text, allow_tools, untrusted)
+        self._begin_turn(user_text, model_text, allow_tools, untrusted, being)
         spoken = []
         completed = False
         try:
             try:
-                content, tool_calls = yield from self._stream_once(True, spoken)
+                content, tool_calls, held = yield from self._stream_held(True, spoken)
+                said = " ".join(held)
+                nudge = None
+                if not tool_calls and held and self._may_retry():
+                    nudge = _NO_TOOL_NUDGE if claims_action(said) else (_ACK_NUDGE if is_bare_ack(said) else None)
+                if nudge:
+                    # "Playing music." / "Understood." - but no tool was called, so nothing happened. Once more.
+                    logger.warning("The model said %r without calling a tool - asking it once more", said)
+                    mark = len(self.messages)
+                    self.messages.append({"role": "assistant", "content": said})
+                    self.messages.append({"role": "system", "content": nudge})
+                    try:
+                        content, tool_calls, held = yield from self._stream_held(True, spoken)
+                    finally:
+                        del self.messages[mark:mark + 2]
+                    if not tool_calls and held and claims_action(" ".join(held)):
+                        held = [lang.tr({"m": _NOTHING_DONE}, "m")]
+                if not tool_calls and held:
+                    if is_idle_reply(" ".join(held)):
+                        # Nothing to do (background talk, half a command): say nothing, main.py decides.
+                        logger.info("The model found nothing to do in that (it said %r) - not speaking it.",
+                                    " ".join(held))
+                        self._idle_turn()
+                        completed = True
+                        self._finish_turn("")
+                        return
+                    for h in held:                  # (the honest "I didn't manage that")
+                        spoken.append(h)
+                        yield h
             except Exception as e:
                 if spoken:
                     raise
@@ -725,9 +914,11 @@ class Brain:
             if not tool_calls:
                 reply = " ".join(spoken).strip() or content
                 if not reply:
-                    reply = "Acknowledged."
-                    spoken.append(reply)
-                    yield reply
+                    # an empty reply: nothing to do either (it used to be spoken as "Acknowledged.")
+                    self._idle_turn()
+                    completed = True
+                    self._finish_turn("")
+                    return
                 self.messages.append({"role": "assistant", "content": reply})
                 completed = True
                 self._finish_turn(reply)

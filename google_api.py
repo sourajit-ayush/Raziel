@@ -1162,7 +1162,8 @@ def _add_event(title: str, start_naive_or_aware: datetime, minutes: Optional[int
     question = _tr("add_q", l, title=title, when=when, dur=dur)
     logger.info("google: asking to confirm adding %r at %s", title, _rfc3339(start))
     if not _cfg("CONFIRM_RISKY_ACTIONS", True):
-        return execute()
+        refusal = confirmation._voice_refusal(CONFIRM_KIND)      # no yes/no question: check the voice here
+        return refusal or execute()
     return confirmation.request(kind=CONFIRM_KIND, question=question, execute=execute,
                                 summary=_tr("add_summary", l, title=title), ack=_tr("add_ack", l))
 

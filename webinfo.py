@@ -1281,6 +1281,16 @@ def _parse_when(when) -> Tuple[int, str]:
     return day, focus
 
 
+def _weather_card(loc: dict, data: dict, seconds: float = 40) -> None:
+    """Today's weather as a card under the orb avatar (cards.py); never fails the answer."""
+    try:
+        import cards
+        cards.show_weather(loc.get("spoken") or loc.get("name") or "", data,
+                           describe_weather(data["current"].get("weather_code")), seconds)
+    except Exception:
+        logger.debug("Weather card failed", exc_info=True)
+
+
 def _weather_answer(place: str, day: int, focus: str) -> str:
     loc, err = _resolve_place(place)
     if loc is None:
@@ -1290,6 +1300,8 @@ def _weather_answer(place: str, day: int, focus: str) -> str:
     except Exception as e:
         logger.warning("Weather: forecast failed: %s", e)
         return lang.tr(_WT, "fail")
+    if day == 0:
+        _weather_card(loc, data, 25)
     reply = _weather_reply(loc, data, day, focus)
     logger.info("Weather: %s (day %d, %s) -> %s", loc.get("name"), day, focus, reply)
     return reply
@@ -1316,6 +1328,7 @@ def weather_briefing_line() -> str:
         hi = _deg(_daily(data, "temperature_2m_max", 0))
         if t is None:
             return ""
+        _weather_card(loc, data, 45)                 # shown while she reads the briefing
         p_raw = _daily(data, "precipitation_probability_max", 0)
         p = _deg(p_raw) if p_raw is not None else None
         rain = _rain_clause("brief_rain", "brief_rain_zero", p, "rain")

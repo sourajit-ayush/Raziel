@@ -1301,6 +1301,24 @@ function setState(s) {
 
 connect();
 
+// ================================================================ Ctrl + mouse wheel over her: bigger / smaller
+// avatar_window.py resizes the window around her centre and remembers it (avatar_place.py).
+let wheelSteps = 0, wheelTimer = 0;
+addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();                        // never the browser's page zoom
+  wheelSteps += e.deltaY < 0 ? 1 : e.deltaY > 0 ? -1 : 0;
+  if (wheelTimer) return;
+  wheelTimer = setTimeout(() => {
+    const steps = Math.max(-6, Math.min(6, wheelSteps));
+    wheelSteps = 0; wheelTimer = 0;
+    const api = window.pywebview && window.pywebview.api;
+    if (steps && api && typeof api.scale === 'function') {
+      try { Promise.resolve(api.scale(Math.pow(1.08, steps))).catch(() => {}); } catch (err) {}
+    }
+  }, 90);
+}, { passive: false });
+
 /* ════════════════════════════════════════════════════════════════════════
    KEYBOARD — for testing without the Python side running
    ════════════════════════════════════════════════════════════════════════ */

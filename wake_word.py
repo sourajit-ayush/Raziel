@@ -76,9 +76,16 @@ def _load_model(model_arg: str) -> Model:
 
 
 def _mic_gated() -> bool:
-    """True while Raziel is speaking unprompted (initiative.py) or just after."""
+    """True while Raziel is speaking unprompted (initiative.py) or just after - and during a call
+    (another app using the mic, quiet_mode.py), so "Raziel" said to a friend doesn't wake her."""
     engine = initiative.engine
-    return bool(engine is not None and engine.mic_should_ignore())
+    if engine is not None and engine.mic_should_ignore():
+        return True
+    try:
+        import quiet_mode
+        return quiet_mode.wake_word_blocked()
+    except Exception:
+        return False
 
 
 class WakeWordDetector:
@@ -211,13 +218,52 @@ class WakeWordDetector:
 
     def wait_for_wake_word(self):
         """Blocks until the wake word is detected (or shutdown is requested)."""
+        self._listen(None)
+
+    def wait_for_name(self, stop_when=None, check_every: float = 0.4) -> bool:
+        """
+        Mid-conversation, while music or a video plays (main.py): only her name counts, not any speech.
+        True = "Raziel" was heard; False = `stop_when()` said to stop waiting (the music stopped) or
+        shutdown was requested.
+        """
+        self._drain()
+        return self._listen(stop_when, check_every)
+
+    def _drain(self):
+        """Throw away audio that queued up while nobody was reading the stream (a sentence you said
+        a moment ago must not count as her name now), and start the model fresh."""
+        if self.stream is None:
+            return
+        try:
+            avail = self.stream.get_read_available()
+            while avail >= config.FRAME_LENGTH:
+                self.stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+                avail -= config.FRAME_LENGTH
+        except Exception:
+            pass
+        try:
+            self.model.reset()
+        except Exception:
+            pass
+
+    def _listen(self, stop_when=None, check_every: float = 0.4) -> bool:
         if self.stream is None:
             self._open_stream()
 
-        logger.info("Listening for wake word '%s'...", self.label)
+        logger.info("Listening for wake word '%s'%s...", self.label,
+                    " (music is playing: only her name counts)" if stop_when is not None else "")
         was_gated = False
+        next_check = time.time() + check_every
+        prev = 0.0
 
         while not shutdown.is_shutting_down():
+            if stop_when is not None and time.time() >= next_check:
+                next_check = time.time() + check_every
+                try:
+                    if stop_when():
+                        return False
+                except Exception:
+                    pass
             try:
                 pcm_bytes = self.stream.read(
                     config.FRAME_LENGTH, exception_on_overflow=False
@@ -242,13 +288,35 @@ class WakeWordDetector:
             score = self._score(predictions)
             self._track_near_miss(score)
 
-            if score >= config.WAKE_WORD_THRESHOLD:
+            # The full threshold at once; the lower music threshold only for two frames in a row (a single
+            # frame of a song brushing past it isn't her name).
+            low = self._threshold()
+            hit = score >= float(config.WAKE_WORD_THRESHOLD) or (score >= low and prev >= low)
+            prev = score
+            if hit:
                 self._near_peak, self._near_quiet = 0.0, 0
                 logger.info("Wake word detected! (score=%.2f)", score)
                 # reset internal buffers so the next detection doesn't
                 # immediately re-trigger on trailing audio
                 self.model.reset()
-                return
+                return True
+        return False
+
+    @staticmethod
+    def _threshold() -> float:
+        """The wake-word threshold; a little lower while other apps play music (the song masks part of
+        your voice): WAKE_WORD_THRESHOLD_MUSIC, when set."""
+        base = float(config.WAKE_WORD_THRESHOLD)
+        low = getattr(config, "WAKE_WORD_THRESHOLD_MUSIC", None)
+        if low is None:
+            return base
+        try:
+            import media_duck
+            if media_duck.playing(2.0):
+                return min(base, float(low))
+        except Exception:
+            pass
+        return base
 
     def close(self):
         if self.stream is not None:

@@ -53,6 +53,16 @@ import winutil
 logger = logging.getLogger("voice_assistant")
 
 
+def _voice_refusal(kind: str):
+    """Voice ID (voice_id.py): None = go ahead, else what to say instead (it wasn't the owner's voice)."""
+    try:
+        import voice_id
+        return voice_id.guard(kind)
+    except Exception:  # noqa: BLE001 - Voice ID trouble must never block her
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
+
+
 # ------------------------------------------------------------------ settings
 
 def _cfg(name: str, default):
@@ -1438,11 +1448,17 @@ def _schedule(fn: Callable[[], object], what: str) -> None:
 
 
 def _lock() -> str:
+    refusal = _voice_refusal("lock_pc")
+    if refusal:
+        return refusal
     _schedule(_lock_now, "lock")
     return _tr("locking")
 
 
 def _sleep_pc() -> str:
+    refusal = _voice_refusal("sleep_pc")
+    if refusal:
+        return refusal
     _schedule(_suspend, "sleep")
     return _tr("sleeping")
 

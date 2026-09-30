@@ -1,6 +1,11 @@
 """
 avatar_window.py — always-on-top pywebview window for the Raziel avatar.
 
+Two avatars (config.AVATAR_STYLE):
+  "orb"  avatar_orb.html - a living orb of glowing particles that can turn into a dragon, a sword,
+         a knight... when asked, and dances to music playing on the PC (the default)
+  "vrm"  avatar.html     - the 3D character, Raziel-1.vrm
+
 WHY THERE'S AN HTTP SERVER IN HERE
 ----------------------------------
 avatar.html loads Raziel-1.vrm with fetch(). WebView2 (like Chrome) blocks
@@ -10,6 +15,12 @@ the model never loads and the window sits on "LOADING" forever.
 So we spin up a tiny static file server bound to 127.0.0.1 on a free port,
 serving only the project folder, and point the window at that. It starts in
 milliseconds, is invisible to the user, and never leaves the machine.
+
+WHERE SHE OPENS
+---------------
+Where you last dragged her, at the size you last gave her (Ctrl + mouse wheel over her, or "make
+yourself bigger"): avatar_place.py saves it in avatar_place.json and brings her back onto a screen
+if that place is gone. Nothing saved yet: the right-hand side of the main screen.
 
 Usage in main.py:
 
@@ -31,11 +42,18 @@ from functools import partial
 
 import webview
 
+import avatar_place
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Portrait aspect — a full-body figure needs roughly 1:1.8.
 WIDTH = 460
 HEIGHT = 820
+# The orb and its shapes were designed in a 3:4 frame.
+ORB_WIDTH = 420
+ORB_HEIGHT = 560
+ORB_PARTICLES = 24000
+PAGES = {"orb": "avatar_orb.html", "vrm": "avatar.html"}
 
 _httpd = None
 _http_thread = None
@@ -136,6 +154,26 @@ except Exception:                       # standalone run, no config on path
 
 _requested = str(getattr(_config, "AVATAR_TRANSPARENCY", "native")).strip().lower()
 TRANSPARENCY = _requested if _requested in ("native", "none") else "native"
+
+
+def _style() -> str:
+    """ "orb" or "vrm". Falls back to the 3D avatar if avatar_orb.html is missing."""
+    requested = str(getattr(_config, "AVATAR_STYLE", "orb")).strip().lower()
+    style = requested if requested in PAGES else "orb"
+    if style == "orb" and not os.path.exists(os.path.join(_SCRIPT_DIR, PAGES["orb"])):
+        print("[avatar] avatar_orb.html is missing next to avatar_window.py - showing the 3D avatar instead.")
+        style = "vrm"
+    return style
+
+
+STYLE = _style()
+
+
+def _int_setting(name: str, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(getattr(_config, name, default))))
+    except (TypeError, ValueError):
+        return default
 
 # Background of the opaque tile ("none" mode, and the automatic fallback).
 DARK_BG = "0d1017"
@@ -239,12 +277,25 @@ def _find_process_windows():
 
 
 
+def _orb_look() -> str:
+    """ "sphere" (she lives in a glass sphere, the default) or "float" (bare particles on the desktop)."""
+    look = str(getattr(_config, "AVATAR_ORB_LOOK", "sphere")).strip().lower()
+    return look if look in ("sphere", "float") else "sphere"
+
+
 def _page_url() -> str:
-    """avatar.html URL for the mode currently in effect."""
-    page = f"{start_file_server()}/avatar.html"
+    """The avatar page's URL for the style and background mode currently in effect."""
+    page = f"{start_file_server()}/{PAGES[STYLE]}"
+    params = []
     if _mode == "none":
-        page += f"?bg={DARK_BG}"
-    return page
+        params.append(f"bg={DARK_BG}")
+    if STYLE == "orb":
+        n = _int_setting("AVATAR_PARTICLES", ORB_PARTICLES, 4000, 60000)
+        if n != ORB_PARTICLES:
+            params.append(f"n={n}")
+        if _mode != "none" and _orb_look() != "sphere":
+            params.append(f"look={_orb_look()}")
+    return page + ("?" + "&".join(params) if params else "")
 
 
 def _near(a, b, tol: int = 14) -> bool:
@@ -352,14 +403,162 @@ def _watch_background(delays=(5, 3, 4, 6, 8, 12)):
               "covered?). Nothing changed.")
 
 
-def create(width: int = WIDTH, height: int = HEIGHT, transparent: bool = None):
+# ---------------------------------------------------------------- where she is (avatar_place.py)
+#
+# All of this works in the window's own screen coordinates: what Windows reports for her window
+# (GetWindowRect) is exactly what is saved, and exactly what is set again next time, so a place
+# round-trips whatever the display scaling. Only the size handed to pywebview at creation is in its
+# own units (WinForms scales it by the screen's DPI); a check right after she appears fixes any
+# difference.
+
+_target = None          # the rectangle she should open with (window pixels)
+_tracking = False       # True once she is on screen: moves / resizes from then on are saved
+_default_size = (ORB_WIDTH, ORB_HEIGHT)
+
+
+_u32 = None
+
+
+def _user32():
+    """A private handle on user32 with proper 64-bit argument types (other modules' calls unaffected)."""
+    global _u32
+    if _u32 is None:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.WinDLL("user32")
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, wintypes.UINT]
+        u.IsIconic.argtypes = [wintypes.HWND]
+        u.IsZoomed.argtypes = [wintypes.HWND]
+        u.GetDpiForWindow.argtypes = [wintypes.HWND]
+        u.GetDpiForWindow.restype = wintypes.UINT
+        _u32 = u
+    return _u32
+
+
+def _hwnd():
+    """Her window's handle, or None."""
+    if os.name != "nt" or _window is None:
+        return None
+    try:
+        return int(_window.native.Handle.ToInt64())
+    except Exception:
+        hosts = _find_process_windows()
+        return hosts[0][0] if hosts else None
+
+
+def _dpi_scale(hwnd=None) -> float:
+    """Window pixels per CSS pixel: 1.25 at 125 % display scaling (1.0 when Windows scales for us)."""
+    if os.name != "nt":
+        return 1.0
+    try:
+        u = _user32()
+        dpi = u.GetDpiForWindow(hwnd) if hwnd else u.GetDpiForSystem()
+        return max(0.5, min(4.0, dpi / 96.0)) if dpi else 1.0
+    except Exception:
+        return 1.0
+
+
+def get_rect():
+    """(x, y, width, height) of her window, or None (no window, minimised, not on Windows)."""
+    hwnd = _hwnd()
+    if not hwnd:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = _user32()
+        if u.IsIconic(hwnd) or u.IsZoomed(hwnd):
+            return None
+        r = wintypes.RECT()
+        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        return r.left, r.top, r.right - r.left, r.bottom - r.top
+    except Exception:
+        return None
+
+
+def set_rect(rect):
+    hwnd = _hwnd()
+    if not hwnd:
+        return
+    try:
+        x, y, w, h = (int(v) for v in rect)
+        _user32().SetWindowPos(hwnd, None, x, y, w, h, 0x0004 | 0x0010)      # NOZORDER | NOACTIVATE
+    except Exception as exc:
+        print(f"[avatar] couldn't move/resize the window: {exc}")
+
+
+def _on_shown():
+    """She is on screen: make sure she has the size / place she should have, then start saving."""
+    global _tracking
+    time.sleep(0.05)
+    try:
+        cur = get_rect()
+        if _target is not None and cur is not None and any(abs(a - b) > 2 for a, b in zip(cur, _target)):
+            set_rect(_target)
+    finally:
+        _tracking = True
+
+
+def _on_changed(*_args):
+    """Every move / resize (a drag sends many): remember the latest; avatar_place saves it a second later."""
+    if not _tracking:
+        return
+    rect = get_rect()
+    if rect is not None and rect[2] >= 50 and rect[3] >= 50 and rect[0] > -20000 and rect[1] > -20000:
+        avatar_place.note(STYLE, rect)
+
+
+class _PageApi:
+    """What the avatar page may call (window.pywebview.api.*): nothing but her own size."""
+
+    def scale(self, factor=1.0):
+        """Ctrl + mouse wheel over her."""
+        try:
+            k = min(1.6, max(0.6, float(factor)))
+        except (TypeError, ValueError):
+            return False
+        c = avatar_place.controller()
+        if c is None:
+            return False
+        rect, _limit = c.scale_by(k)
+        return rect is not None
+
+
+def _initial_rect(width: int, height: int, scale: float):
+    """Saved place (made visible on today's screens), else the default spot. Window pixels."""
+    areas = avatar_place.work_areas()
+    saved = avatar_place.load(STYLE)
+    if saved is not None:
+        rect = avatar_place.fit_rect(saved, areas)
+        if rect != saved:
+            print(f"[avatar] the saved place {saved} isn't on a screen any more - using {rect}")
+        return rect
+    return avatar_place.default_rect(int(round(width * scale)), int(round(height * scale)), areas)
+
+
+def create(width: int = None, height: int = None, transparent: bool = None):
     """
     Create the always-on-top avatar window. Call from the MAIN thread only.
     Returns the pywebview Window object.
     """
-    global _window, _mode, _watchdog_started
+    global _window, _mode, _watchdog_started, _target, _tracking, _default_size
     _mode = TRANSPARENCY
     page = _page_url()
+    if STYLE == "orb":
+        width = width or _int_setting("AVATAR_ORB_WINDOW_WIDTH", ORB_WIDTH, 200, 2000)
+        height = height or _int_setting("AVATAR_ORB_WINDOW_HEIGHT", ORB_HEIGHT, 200, 2000)
+    else:
+        width, height = width or WIDTH, height or HEIGHT
+    _default_size = (width, height)
+    scale = _dpi_scale()
+    _target = _initial_rect(width, height, scale)
+    _tracking = False
+    x, y = _target[0], _target[1]
+    # pywebview wants the size in its own units (it scales by the DPI); the position as is.
+    width, height = max(100, int(round(_target[2] / scale))), max(100, int(round(_target[3] / scale)))
 
     if transparent is None:
         transparent = (_mode == "native")
@@ -368,7 +567,7 @@ def create(width: int = WIDTH, height: int = HEIGHT, transparent: bool = None):
     # mode it is the tile colour, so no seam shows at the edges while resizing.
     host_bg = f"#{DARK_BG}" if _mode == "none" else "#000000"
 
-    print(f"[avatar] window mode: {_mode}"
+    print(f"[avatar] {STYLE} avatar, window mode: {_mode}"
           + (" (transparent background)" if transparent else " (opaque dark tile)"))
 
     _window = webview.create_window(
@@ -387,10 +586,21 @@ def create(width: int = WIDTH, height: int = HEIGHT, transparent: bool = None):
         # must not have. Only the opaque tile keeps it.
         shadow=not transparent,
         background_color=host_bg,
-        # Bottom-right of a 1080p screen; adjust or delete to let Windows place it.
-        x=1420,
-        y=180,
+        x=x,                     # where you left her last time (avatar_place.py)
+        y=y,
+        js_api=_PageApi(),       # Ctrl + mouse wheel over her -> bigger / smaller
     )
+
+    events = getattr(_window, "events", None)
+    if events is not None:
+        try:
+            events.shown += _on_shown
+            events.moved += _on_changed
+            events.resized += _on_changed
+        except Exception as exc:
+            print(f"[avatar] couldn't watch the window's moves: {exc}")
+    avatar_place.set_controller(avatar_place.Controller(
+        STYLE, get_rect, set_rect, lambda: _dpi_scale(_hwnd()), _default_size))
 
     if _mode == "native" and not _watchdog_started:
         _watchdog_started = True
@@ -398,11 +608,22 @@ def create(width: int = WIDTH, height: int = HEIGHT, transparent: bool = None):
 
     try:
         import shutdown
-        shutdown.on_shutdown(lambda: webview.destroy())
+        shutdown.on_shutdown(_close_windows)              # (callbacks run last-registered first:)
+        shutdown.on_shutdown(avatar_place.flush)          # a drag in the last second is saved, then she closes
     except Exception:
         pass
 
     return _window
+
+
+def _close_windows():
+    """Stop Raziel: close her window(s) so pywebview's loop ends. (pywebview has no module-level
+    destroy(); each window closes itself.)"""
+    for w in list(getattr(webview, "windows", None) or []):
+        try:
+            w.destroy()
+        except Exception:
+            pass
 
 
 def start(debug: bool = False):
@@ -454,7 +675,7 @@ def list_windows():
 
 
 def reload():
-    """Reload avatar.html without restarting Raziel - handy while tuning."""
+    """Reload the avatar page without restarting Raziel - handy while tuning."""
     if _window is not None and _base_url:
         _window.load_url(_page_url())        # keeps the current mode's URL params
 

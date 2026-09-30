@@ -43,6 +43,77 @@ from viseme_map import phoneme_to_viseme
 logger = logging.getLogger("voice_assistant")
 
 
+def _mic_pa(pa):
+    """After a microphone failure audio_recorder.py uses a fresh PyAudio instance: so does her barge-in ear."""
+    try:
+        import audio_recorder
+        return audio_recorder.mic_pa(pa)
+    except Exception:  # noqa: BLE001
+        return pa
+
+
+def _close_quietly(stream):
+    """Closing a stream after a host error raises "Stream not open": that must not end her reply."""
+    if stream is None:
+        return
+    for fn in (getattr(stream, "stop_stream", None), getattr(stream, "close", None)):
+        try:
+            if fn is not None:
+                fn()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# "Skip ahead" (a swipe down while she talks, gestures.py): cuts the sentence / paragraph that is
+# playing - or, between two of them, the next one - and the rest of the reply goes on. Long replies are
+# spoken piece by piece (speak_interruptible -> speak_stream_interruptible) so there is a "next" to go on to.
+_playing = threading.Event()          # a sentence is coming out of the speakers right now
+_skip = threading.Event()
+_replies = [0]                        # speak_*() calls in progress (she is "talking", gaps included)
+_no_skip = [0]                        # plain speak() calls in progress (questions she must finish)
+_protected_now = threading.Event()    # a yes/no question inside a streamed reply is playing
+_replies_lock = threading.Lock()
+
+
+def _reply_started():
+    with _replies_lock:
+        _replies[0] += 1
+    _skip.clear()                     # a skip meant for an earlier reply doesn't cut this one
+
+
+def _reply_ended():
+    with _replies_lock:
+        _replies[0] = max(0, _replies[0] - 1)
+        if _replies[0] == 0:
+            _skip.clear()
+            _protected_now.clear()
+
+
+def is_playing() -> bool:
+    """True while she is saying something (including the short gaps between sentences)."""
+    return _playing.is_set() or _replies[0] > 0
+
+
+def skip_current() -> bool:
+    """Skips what she is saying (or, between sentences, the next one). False if she is quiet, or asking
+    a question that has to be heard in full."""
+    if not is_playing() or _no_skip[0] > 0 or _protected_now.is_set():
+        return False
+    _skip.set()
+    return True
+
+
+def split_long(text: str, min_chars: int = 220):
+    """A long text as speakable pieces (paragraphs, else sentences), or None when it is short."""
+    import re as _re
+    text = (text or "").strip()
+    if len(text) < min_chars:
+        return None
+    paras = [p.strip() for p in _re.split(r"\n\s*\n|\n", text) if p.strip()]
+    pieces = paras if len(paras) > 1 else [p for p in _re.split(r"(?<=[.!?।])\s+", text) if p.strip()]
+    return pieces if len(pieces) > 1 else None
+
+
 def _rms(chunk_bytes: bytes) -> float:
     samples = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32)
     if len(samples) == 0:
@@ -231,14 +302,14 @@ class Speaker:
 
         return pcm_data, n_channels, sample_width, frame_rate, viseme_timeline
 
-    def _play(self, text: str, stop_event=None, prepared=None):
+    def _play(self, text: str, stop_event=None, prepared=None, skippable=True):
         """Synthesizes and plays text, checking stop_event between chunks for interruptibility.
         `prepared` is an already-synthesized _synthesize() result (streaming replies
         synthesize the NEXT sentence while the current one is still playing)."""
         with self._play_lock:
-            self._play_locked(text, stop_event, prepared)
+            self._play_locked(text, stop_event, prepared, skippable)
 
-    def _play_locked(self, text: str, stop_event=None, prepared=None):
+    def _play_locked(self, text: str, stop_event=None, prepared=None, skippable=True):
         pcm_data, n_channels, sample_width, frame_rate, viseme_timeline = (
             prepared if prepared is not None else self._synthesize(text)
         )
@@ -265,13 +336,19 @@ class Speaker:
                 speech_started = True
 
             chunk_size = 2048
+            _playing.set()
             for i in range(0, len(pcm_data), chunk_size):
                 if stop_event is not None and stop_event.is_set():
+                    break
+                if skippable and _skip.is_set():
+                    _skip.clear()
+                    logger.info("Skipped ahead (gesture)")
                     break
                 stream.write(pcm_data[i:i + chunk_size])
             stream.stop_stream()
             stream.close()
         finally:
+            _playing.clear()
             if out_pa is not None:
                 out_pa.terminate()
             # Paired with send_speech above: sent whenever (and only when) a
@@ -284,7 +361,15 @@ class Speaker:
         if not text:
             text = "Input not registered."
         logger.info("Speaking: %s", text)
-        self._play(text)
+        _reply_started()
+        with _replies_lock:
+            _no_skip[0] += 1
+        try:
+            self._play(text, skippable=False)
+        finally:
+            with _replies_lock:
+                _no_skip[0] = max(0, _no_skip[0] - 1)
+            _reply_ended()
 
     def speak_interruptible(self, text: str, pa: pyaudio.PyAudio):
         """
@@ -302,7 +387,21 @@ class Speaker:
         if not text:
             text = "Acknowledged."
 
+        pieces = split_long(text)
+        if pieces is not None:
+            # A long text (the morning briefing, a long answer): spoken piece by piece - the first is heard
+            # sooner, and a swipe down can skip ahead to the next one. Barge-in works the same.
+            interrupted, pre_roll, _spoken = self.speak_stream_interruptible(iter(pieces), pa)
+            return interrupted, pre_roll
+
         logger.info("Speaking (interruptible): %s", text)
+        _reply_started()
+        try:
+            return self._speak_interruptible(text, pa)
+        finally:
+            _reply_ended()
+
+    def _speak_interruptible(self, text: str, pa: pyaudio.PyAudio):
         stop_event = threading.Event()
         interrupted = {"value": False}
 
@@ -323,7 +422,7 @@ class Speaker:
         consecutive = 0                  # frames in a row at/above threshold (debounce)
         need = max(1, int(getattr(config, "BARGE_IN_CONSECUTIVE_FRAMES", 1)))
         try:
-            stream = pa.open(
+            stream = _mic_pa(pa).open(
                 rate=config.SAMPLE_RATE,
                 channels=1,
                 format=pyaudio.paInt16,
@@ -348,9 +447,7 @@ class Speaker:
         except Exception as e:
             logger.error("Barge-in monitoring failed: %s", e)
         finally:
-            if stream is not None:
-                stream.stop_stream()
-                stream.close()
+            _close_quietly(stream)
 
         play_thread.join(timeout=3)
         if not interrupted["value"]:
@@ -359,6 +456,14 @@ class Speaker:
         return interrupted["value"], (list(pre_roll) if interrupted["value"] else None)
 
     def speak_stream_interruptible(self, pieces, pa: pyaudio.PyAudio, protect=None):
+        """Speaks a streamed reply (see _speak_stream). Returns (interrupted, pre_roll_frames, spoken_text)."""
+        _reply_started()
+        try:
+            return self._speak_stream(pieces, pa, protect)
+        finally:
+            _reply_ended()
+
+    def _speak_stream(self, pieces, pa: pyaudio.PyAudio, protect=None):
         """
         Speaks a reply that is still being WRITTEN: `pieces` is a generator of
         sentences (Brain.stream_turn()). Three stages run concurrently, so the
@@ -446,10 +551,12 @@ class Speaker:
                 # the player thread exits, in which the tail of her own voice would still count.
                 if must_hear:
                     protected.set()
+                    _protected_now.set()
                 else:
                     protected.clear()
+                    _protected_now.clear()
                 try:
-                    self._play(text, stop_event, prepared)
+                    self._play(text, stop_event, prepared, skippable=not must_hear)
                 except Exception:
                     logger.exception("Playback failed")
 
@@ -471,7 +578,7 @@ class Speaker:
         consecutive = 0                  # frames in a row at/above threshold (debounce)
         need = max(1, int(getattr(config, "BARGE_IN_CONSECUTIVE_FRAMES", 1)))
         try:
-            stream = pa.open(
+            stream = _mic_pa(pa).open(
                 rate=config.SAMPLE_RATE,
                 channels=1,
                 format=pyaudio.paInt16,
@@ -507,9 +614,7 @@ class Speaker:
             logger.error("Barge-in monitoring failed: %s", e)
             monitor_failed = True
         finally:
-            if stream is not None:
-                stream.stop_stream()
-                stream.close()
+            _close_quietly(stream)
 
         if monitor_failed and not interrupted["value"]:
             play_thread.join(timeout=60)      # nothing can interrupt her now: let her finish

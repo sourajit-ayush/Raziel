@@ -45,6 +45,16 @@ import memory
 
 logger = logging.getLogger("voice_assistant")
 
+
+def _voice_refusal(kind: str):
+    """Voice ID (voice_id.py): None = go ahead, else what to say instead (it wasn't the owner's voice)."""
+    try:
+        import voice_id
+        return voice_id.guard(kind)
+    except Exception:  # noqa: BLE001 - Voice ID trouble must never block her
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
+
 DEFAULT_LIST = "to-do"
 
 # ------------------------------------------------------------------ strings (English / Hindi)
@@ -901,6 +911,9 @@ def _do_notes_count() -> str:
 
 
 def _do_delete_last_note() -> str:
+    refusal = _voice_refusal("delete_note")
+    if refusal:
+        return refusal
     text = _delete_last_note()
     if text is None:
         return _tr("notes_none")

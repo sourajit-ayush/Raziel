@@ -25,7 +25,7 @@ Usage in main.py
 ----------------
     import shutdown
     shutdown.install()
-    shutdown.on_shutdown(lambda: webview.destroy())
+    shutdown.on_shutdown(lambda: [w.destroy() for w in webview.windows])
     shutdown.on_shutdown(avatar_server.stop)
     ...
     while not shutdown.is_shutting_down():

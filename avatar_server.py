@@ -20,6 +20,13 @@ Public API — all safe to call from any thread, all non-blocking:
     avatar_server.gesture("nod")
     avatar_server.set_framing("full")           # full | upper | face
     avatar_server.stop()
+
+Orb avatar (avatar_orb.html) only - the 3D avatar simply ignores these:
+
+    avatar_server.set_form("dragon")            # orb dragon sword knight butterfly planet heart galaxy
+    avatar_server.send_action("roar")           # roar fire fly stay swing attack block raise
+    avatar_server.send_music(True, bands, wave) # 48 band bytes from music_listener.py
+    avatar_server.set_dance(False)              # "stop dancing"
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from typing import Any, Dict, Iterable, Optional, Set
 
 try:
@@ -82,6 +90,12 @@ VALID_GESTURES = (
     "chinTouch", "hairTouch", "armFidget",
 )
 
+# Shapes the orb avatar can take, and the actions they perform (avatar_orb.html has the same lists).
+VALID_FORMS = ("orb", "dragon", "sword", "knight", "butterfly", "planet", "heart", "galaxy", "universe")
+ACTION_FORM = {"roar": "dragon", "fire": "dragon", "fly": "dragon", "stay": "dragon",
+               "swing": "sword", "attack": "knight", "block": "knight", "raise": "knight"}
+VALID_ACTIONS = tuple(ACTION_FORM)
+
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
 _clients: Set[Any] = set()
@@ -97,14 +111,30 @@ _last: Dict[str, Dict[str, Any]] = {
     "framing": {"type": "framing", "mode": "full"},
 }
 
+# What she is doing right now, for music_listener.py: her own voice is in the speakers' mix too, so
+# while she talks (and a moment after) the music detector must not mistake it for a song.
+_state_now = "idle"
+_speech_ended_at = 0.0
+
+
+def _note_state(state: str):
+    global _state_now, _speech_ended_at
+    if _state_now == "speaking" and state != "speaking":
+        _speech_ended_at = time.monotonic()
+    _state_now = state
+
 
 # ---------------------------------------------------------------- asyncio side
 
 async def _handler(websocket, *_args):
     _clients.add(websocket)
     try:
-        for msg in _last.values():
-            await websocket.send(json.dumps(msg))
+        # A copy: set_form()/set_dance() may add keys from another thread while this awaits.
+        # "replay" tells the page this is a catch-up, not a fresh request.
+        for msg in list(_last.values()):
+            await websocket.send(json.dumps({**msg, "replay": True}))
+        for card in list(cards().values()):
+            await websocket.send(json.dumps({"type": "card", "card": card, "replay": True}))
         async for _raw in websocket:
             pass  # avatar.html only sends a 'hello'; nothing to act on
     except Exception:
@@ -215,6 +245,7 @@ def set_state(state: str):
     """idle | listening | thinking | speaking — drives posture, gaze, brow."""
     if state not in VALID_STATES:
         return
+    _note_state(state)
     _last["state"] = {"type": "state", "state": state}
     _send(_last["state"])
 
@@ -231,6 +262,7 @@ def speech_start():
 
 
 def speech_end(next_state: str = "idle"):
+    _note_state(next_state if next_state in VALID_STATES else "idle")
     _send({"type": "speech_end", "next": next_state})
     _last["state"] = {"type": "state", "state": next_state}
 
@@ -271,6 +303,131 @@ def set_framing(mode: str = "full"):
         return
     _last["framing"] = {"type": "framing", "mode": mode}
     _send(_last["framing"])
+
+
+def current_state() -> str:
+    """idle | listening | thinking | speaking - the last state sent to the avatar."""
+    return _state_now
+
+
+def is_speaking(tail: float = 0.0) -> bool:
+    """True while she is talking, and for `tail` seconds after she stopped."""
+    if _state_now == "speaking":
+        return True
+    return tail > 0 and _speech_ended_at > 0 and (time.monotonic() - _speech_ended_at) < tail
+
+
+# ---------------------------------------------------------------- orb avatar: shapes, actions, music
+
+def current_form() -> str:
+    """The shape she was last asked to take ("orb" until then)."""
+    return str(_last.get("form", {}).get("name", "orb"))
+
+
+def set_form(name: str) -> bool:
+    """Turn the orb into one of VALID_FORMS. Remembered, so a reloaded window comes back in shape."""
+    name = str(name or "").strip().lower()
+    if name not in VALID_FORMS:
+        return False
+    _last["form"] = {"type": "form", "name": name}
+    _send(_last["form"])
+    return True
+
+
+def form_for_action(name: str) -> Optional[str]:
+    """Which shape performs an action. A sword told to "attack" swings; a knight told to "swing" attacks."""
+    name = str(name or "").strip().lower()
+    form = ACTION_FORM.get(name)
+    if form is None:
+        return None
+    current = current_form()
+    if name == "attack" and current == "sword":
+        return "sword"
+    if name == "swing" and current == "knight":
+        return "knight"
+    return form
+
+
+def send_action(name: str) -> bool:
+    """roar / fire / fly / stay / swing / attack / block / raise. The page first becomes the right shape."""
+    name = str(name or "").strip().lower()
+    form = form_for_action(name)
+    if form is None:
+        return False
+    _last["form"] = {"type": "form", "name": form}
+    _send({"type": "action", "name": name})
+    return True
+
+
+def send_music(on: bool, bands=None, wave=None):
+    """
+    What the PC is playing, for the orb to dance to (music_listener.py, ~30 times a second).
+    bands: 48 ints 0..255 (30 Hz - 14 kHz, log-spaced). wave: a few samples of the waveform, -127..127.
+    """
+    msg: Dict[str, Any] = {"type": "music", "on": bool(on)}
+    if on and bands is not None:
+        msg["b"] = [max(0, min(255, int(v))) for v in bands]
+        if wave is not None:
+            msg["w"] = [max(-127, min(127, int(v))) for v in wave]
+    _send(msg)
+
+
+def set_dance(on: bool):
+    """ "dance" / "stop dancing": whether the orb reacts to music at all."""
+    _last["dance"] = {"type": "dance", "on": bool(on)}
+    _send(_last["dance"])
+
+
+def set_universe(msg: Dict[str, Any]):
+    """The universe map (universes.py): the beings (names, colours, symbols, helpers), which one the camera
+    is on ("focus"), the big view. Merged and remembered, so a reloaded window shows the same."""
+    if not isinstance(msg, dict):
+        return
+    msg = {k: v for k, v in msg.items() if k not in ("type", "replay")}
+    cur = dict(_last.get("universe") or {"type": "universe"})
+    cur.update(msg)
+    _last["universe"] = cur
+    _send({"type": "universe", **msg})
+
+
+# ---------------------------------------------------------------- orb avatar: mini cards under the orb
+# cards.py (timers, Spotify, weather) and quiet_mode.py (pop-ups) send these; the page lays them out.
+
+_cards: Dict[str, Dict[str, Any]] = {}
+_cards_lock = threading.Lock()
+
+
+def show_card(card: Dict[str, Any]):
+    """Adds or updates a card by its "id". Kinds: timer, music, weather, note, status."""
+    if not isinstance(card, dict) or not card.get("id"):
+        return
+    card = dict(card)
+    with _cards_lock:
+        if card.get("ttl"):
+            card["until"] = int(time.time() * 1000 + float(card["ttl"]) * 1000)
+        if _cards.get(card["id"]) == card:
+            return                      # nothing changed: don't resend 1/s
+        _cards[card["id"]] = card
+        # notes (pop-ups) pile up: keep the newest few for a reconnecting window
+        notes = [k for k in _cards if k.startswith("note:")]
+        for k in notes[:-3]:
+            _cards.pop(k, None)
+    _send({"type": "card", "card": card})
+
+
+def hide_card(card_id: str):
+    with _cards_lock:
+        existed = _cards.pop(card_id, None) is not None
+    if existed:
+        _send({"type": "card_remove", "id": card_id})
+
+
+def cards() -> Dict[str, Dict[str, Any]]:
+    with _cards_lock:
+        now_ms = time.time() * 1000
+        for k in [k for k, c in _cards.items() if c.get("until") and c["until"] < now_ms]:
+            _cards.pop(k, None)
+        return dict(_cards)
 
 
 def _normalize_timeline(timeline) -> list:

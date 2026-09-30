@@ -39,11 +39,65 @@ import transcript_guard
 logger = logging.getLogger("voice_assistant")
 
 
+def _playlist_terms() -> list:
+    """Your Spotify playlist names (tools.py saves them), so "play my Crazy playlist" isn't heard as
+    "graphic playlist". Short names only, at most WHISPER_PLAYLIST_HINTS of them."""
+    limit = int(getattr(config, "WHISPER_PLAYLIST_HINTS", 12) or 0)
+    if limit <= 0:
+        return []
+    try:
+        import tools
+        names = tools.playlist_names()
+    except Exception:
+        return []
+    out = []
+    for n in names:
+        n = " ".join(str(n).split())
+        if n and len(n) <= 32 and len(n.split()) <= 4 and any(ch.isalpha() for ch in n):
+            out.append(n)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# Names Whisper gets wrong in commands ("Open JetGPT", "open what's app").
+APP_HINTS = ("ChatGPT", "Gemini", "Spotify", "WhatsApp", "YouTube")
+
+
+def _app_terms() -> list:
+    return list(APP_HINTS) if getattr(config, "WHISPER_APP_HINTS", True) else []
+
+
+def _folder_terms() -> list:
+    """Short, unusual folder names from your Desktop / Documents (COA, DBMS ...): "open my COA folder"
+    came out as "Opendazio A Folder". At most WHISPER_FOLDER_HINTS of them (tools.py lists them)."""
+    limit = int(getattr(config, "WHISPER_FOLDER_HINTS", 15) or 0)
+    if limit <= 0:
+        return []
+    try:
+        import tools
+        return tools.folder_hint_names(limit)
+    except Exception:
+        return []
+
+
 def _vocabulary_terms() -> list:
     """Names/terms Whisper tends to mishear (CUSTOM_VOCABULARY + CONTACTS)."""
     names = set(config.CUSTOM_VOCABULARY)
     names.update(name.title() for name in config.CONTACTS.keys())
+    try:
+        import universes                     # the beings' names ("Melody", "Chronos"...): hints, and a bare
+        names.update(universes.names())      # "Melody." out of noise must be said clearly (the guard's check)
+    except Exception:
+        pass
     return sorted(names)
+
+
+def _prompt_terms() -> list:
+    """What Whisper is primed with: the vocabulary plus your playlist names, the app names above and
+    your folder names. (The guard's name checks use only the vocabulary: playlist names are often
+    plain words - "Crazy", "Chill", "Time".)"""
+    return sorted(set(_vocabulary_terms()) | set(_playlist_terms()) | set(_app_terms()) | set(_folder_terms()))
 
 
 def _build_vocabulary_prompt() -> str:
@@ -53,10 +107,36 @@ def _build_vocabulary_prompt() -> str:
     initial_prompt, this measurably biases word recognition toward these
     specific words without needing a bigger/slower model.
     """
-    names = _vocabulary_terms()
+    names = _prompt_terms()
     if not names:
         return ""
     return ", ".join(names)
+
+
+def _detect_language_1_0(model, audio) -> dict:
+    """WhisperModel.detect_language() only exists from faster-whisper 1.1; the installed 1.0.x has
+    none, so "auto" never worked (the log: "Language detection failed ... assuming en" on every turn).
+    This is what 1.0.x's transcribe() does inside to detect the language: the first 30 s of the
+    features through the encoder, then the model's language head."""
+    import numpy as np
+    fe = model.feature_extractor
+    features = fe(audio)
+    frames = int(getattr(fe, "nb_max_frames", 3000))
+    segment = features[:, :frames]
+    if segment.shape[-1] < frames:
+        segment = np.pad(segment, ((0, 0), (0, frames - segment.shape[-1])))
+    encoder_output = model.encode(segment)
+    results = model.model.detect_language(encoder_output)[0]
+    return {str(tok)[2:-2]: float(p) for tok, p in results}
+
+
+def _temperatures():
+    temps = getattr(config, "WHISPER_TEMPERATURES", (0.0, 0.2, 0.4))
+    try:
+        temps = [float(t) for t in temps]
+    except (TypeError, ValueError):
+        temps = [0.0, 0.2, 0.4]
+    return temps or [0.0]
 
 
 class Transcriber:
@@ -88,6 +168,7 @@ class Transcriber:
         logger.info("Whisper model loaded.")
 
         self.last_language = "en"           # language of the previous utterance ("en" | "hi")
+        self._prev_language = "en"
         self.hindi_model = None             # bigger model for Hindi, loaded in the background
         self._hindi_loading = False
         self._threads = threads
@@ -139,7 +220,10 @@ class Transcriber:
         """Probabilities for the languages Whisper considers ({"en": 0.93, "hi": 0.02, ...})."""
         from faster_whisper import decode_audio          # lazy: the stub in tests has none
         audio = decode_audio(wav_path, sampling_rate=16000)
-        result = self.model.detect_language(audio)
+        if hasattr(self.model, "detect_language"):
+            result = self.model.detect_language(audio)
+        else:
+            result = _detect_language_1_0(self.model, audio)
         probs = {}
         if isinstance(result, dict):
             probs = dict(result)
@@ -169,8 +253,13 @@ class Transcriber:
             # scores in between and must not flip the conversation back and forth).
             chosen = "en" if (en_p >= need and en_p > hi_p) else "hi"
         else:
-            chosen = "hi" if (hi_p >= need and hi_p > en_p) else "en"
+            # Into Hindi only when it is clear: detection never ran before (faster-whisper 1.0 had no
+            # detect_language), so an accented English command must not start landing on the slow
+            # Hindi model now.
+            need_in = max(need, float(getattr(config, "HINDI_SWITCH_PROBABILITY", 0.75)))
+            chosen = "hi" if (hi_p >= need_in and hi_p > en_p) else "en"
         if duration_s and duration_s < 1.0:
+            # (one or two words - "yes", "haan", "Raziel" - say almost nothing about the language)
             # A one-word answer ("yes", "haan") tells the detector almost nothing:
             # keep the language of the conversation unless it is very sure.
             other = "en" if self.last_language == "hi" else "hi"
@@ -178,6 +267,10 @@ class Transcriber:
             chosen = other if sure else self.last_language
         logger.info("Language check: en=%.2f hi=%.2f -> %s", en_p, hi_p, chosen)
         return chosen
+
+    def forget_last_turn(self):
+        """The last transcript was dropped (not your voice): its language doesn't count."""
+        self.last_language = self._prev_language
 
     # ------------------------------------------------------------------ transcription
 
@@ -214,13 +307,16 @@ class Transcriber:
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
             compression_ratio_threshold=2.4,
+            # When a pass looks wrong Whisper decodes the clip again, hotter each time - up to six
+            # passes on a noisy clip (a song behind you: 30 s for 11 s of audio). Three is plenty.
+            temperature=_temperatures(),
         )
 
         # `segments` is a lazy generator - consume it exactly once.
         segments = list(segments)
         if language == "hi":
             logger.info("Hindi transcription took %.1fs.", time.time() - started)
-        self.last_language = language
+        self._prev_language, self.last_language = self.last_language, language
 
         # Gate 2: is what came back a real utterance?
         if not guard_on:
@@ -229,6 +325,7 @@ class Transcriber:
         result = transcript_guard.check_segments(
             segments,
             custom_vocabulary=_vocabulary_terms(),
+            hint_terms=_prompt_terms() if vocabulary_prompt else (),
             stats=stats,
             protected_phrases=config.SLEEP_PHRASES,
         )

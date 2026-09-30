@@ -26,6 +26,72 @@ def _mic_gated() -> bool:
     return bool(engine is not None and engine.mic_should_ignore())
 
 
+# ------------------------------------------------------------------ a microphone that comes back
+# The log had "OSError: [Errno -9999] Unanticipated host error" in the middle of listening (a headset
+# connecting, Windows switching the default mic, a driver hiccup): the turn crashed, and five of those
+# end the voice loop. PortAudio keeps the device list from when it started, so after such an error only
+# a NEW PyAudio instance sees the microphone again: it replaces the one main.py passed in, from then on.
+_fresh = {"pa": None, "failures": 0, "last_log": 0.0}
+
+
+def mic_pa(pa):
+    """The PyAudio instance to open the microphone with (a fresh one after the mic failed)."""
+    return _fresh["pa"] or pa
+
+
+def _renew_pa():
+    old = _fresh["pa"]
+    try:
+        _fresh["pa"] = pyaudio.PyAudio()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Couldn't restart the audio system: %s", e)
+        return
+    if old is not None:
+        try:
+            old.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _close(stream):
+    if stream is None:
+        return
+    try:
+        stream.stop_stream()
+    except Exception:  # noqa: BLE001  ("Stream not open" after a host error)
+        pass
+    try:
+        stream.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def mic_failed(exc: BaseException):
+    """A microphone read / open failed: new device list for the next open, and a short pause that grows
+    while it keeps failing (so a missing mic doesn't spin)."""
+    _fresh["failures"] += 1
+    now = time.time()
+    if now - _fresh["last_log"] > 30 or _fresh["failures"] <= 2:
+        logger.warning("The microphone stopped working (%s) - reopening it (attempt %d).", exc, _fresh["failures"])
+        _fresh["last_log"] = now
+    _renew_pa()
+    shutdown.wait(min(0.3 * _fresh["failures"], 5.0))
+
+
+def mic_ok():
+    _fresh["failures"] = 0
+
+
+def _open_mic(pa):
+    return mic_pa(pa).open(
+        rate=config.SAMPLE_RATE,
+        channels=1,
+        format=pyaudio.paInt16,
+        input=True,
+        frames_per_buffer=config.FRAME_LENGTH,
+    )
+
+
 def _rms(chunk_bytes: bytes) -> float:
     """Root-mean-square volume of a chunk of 16-bit PCM audio."""
     samples = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32)
@@ -50,7 +116,7 @@ def _calibrate_ambient_noise(stream) -> float:
     return float(np.mean(levels)) if levels else 0.0
 
 
-def wait_for_voice(pa: pyaudio.PyAudio):
+def wait_for_voice(pa: pyaudio.PyAudio, timeout: float = None, stop_when=None, veto=None):
     """
     Blocks silently (no recording, no transcription) until incoming audio
     is CLEARLY and CONSISTENTLY louder than the current room's ambient
@@ -67,8 +133,14 @@ def wait_for_voice(pa: pyaudio.PyAudio):
         live measurement instead of an unrelated static threshold
 
     Returns (None, None) if shutdown was requested while waiting - callers
-    must check shutdown.is_shutting_down() before recording.
+    must check shutdown.is_shutting_down() before recording. Also (None, None)
+    after `timeout` seconds without speech, or as soon as `stop_when()` is true
+    (main.py: music started playing - she then waits for her name instead).
+    `veto()` is asked the moment speech seems to start: true = another app is
+    making sound right now (a song's first bar, a notification), so this isn't
+    you starting a sentence - keep listening instead of recording it.
     """
+    started = time.time()
     # If she is mid-sentence, wait it out BEFORE opening the mic: calibrating
     # "ambient noise" against her own voice would set the trigger threshold far
     # too high and make her deaf to you for the rest of the turn.
@@ -77,13 +149,11 @@ def wait_for_voice(pa: pyaudio.PyAudio):
             return None, None
         time.sleep(0.1)
 
-    stream = pa.open(
-        rate=config.SAMPLE_RATE,
-        channels=1,
-        format=pyaudio.paInt16,
-        input=True,
-        frames_per_buffer=config.FRAME_LENGTH,
-    )
+    try:
+        stream = _open_mic(pa)
+    except OSError as e:
+        mic_failed(e)
+        return None, None               # main.py simply comes back here: a fresh mic is tried next time
 
     chunks_per_second = config.SAMPLE_RATE / config.FRAME_LENGTH
     buffer_len = max(1, int(0.5 * chunks_per_second))
@@ -113,9 +183,21 @@ def wait_for_voice(pa: pyaudio.PyAudio):
             1, int(config.MIN_SUSTAINED_VOICE_MS / 1000 * chunks_per_second)
         )
         consecutive_loud = 0
+        next_check = time.time() + 0.3
 
         while not shutdown.is_shutting_down():
             data = stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+
+            if consecutive_loud == 0 and time.time() >= next_check:
+                next_check = time.time() + 0.3
+                if timeout is not None and time.time() - started >= timeout:
+                    return None, None
+                if stop_when is not None:
+                    try:
+                        if stop_when():
+                            return None, None
+                    except Exception:
+                        pass
 
             # Raziel started talking on her own initiative while we were
             # listening: keep draining the mic but ignore it, and forget any
@@ -136,12 +218,27 @@ def wait_for_voice(pa: pyaudio.PyAudio):
             # not just one instantaneous spike - filters out clicks, coughs,
             # a door closing, etc. that cross the threshold only briefly.
             if consecutive_loud >= sustained_chunks_needed:
+                # A song / video that just started sounds like someone talking: if another app is
+                # making sound right now, this isn't you starting a sentence. Keep listening (if it
+                # is music, stop_when() ends the wait in a moment; if it was a 'ding', you're heard next).
+                vetoed = False
+                if veto is not None:
+                    try:
+                        vetoed = bool(veto())
+                    except Exception:
+                        vetoed = False
+                if vetoed:
+                    consecutive_loud = 0
+                    continue
+                mic_ok()
                 return list(pre_roll), ambient_level
 
         return None, None   # shutdown requested while waiting
+    except OSError as e:
+        mic_failed(e)
+        return None, None
     finally:
-        stream.stop_stream()
-        stream.close()
+        _close(stream)
 
 
 def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_level=None) -> str:
@@ -160,20 +257,18 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
     SILENCE_RMS_THRESHOLD when not provided (e.g. the very first turn after
     a wake word, which doesn't go through wait_for_voice).
     """
-    stream = pa.open(
-        rate=config.SAMPLE_RATE,
-        channels=1,
-        format=pyaudio.paInt16,
-        input=True,
-        frames_per_buffer=config.FRAME_LENGTH,
-    )
+    frames = list(pre_roll_frames) if pre_roll_frames else []
+    try:
+        stream = _open_mic(pa)
+    except OSError as e:
+        mic_failed(e)
+        stream = None
 
     if ambient_level is not None:
         silence_threshold = ambient_level + config.SILENCE_STOP_MARGIN
     else:
         silence_threshold = config.SILENCE_RMS_THRESHOLD
 
-    frames = list(pre_roll_frames) if pre_roll_frames else []
     silent_chunks = 0
     chunks_per_second = config.SAMPLE_RATE / config.FRAME_LENGTH
     silence_chunks_needed = int(config.SILENCE_DURATION * chunks_per_second)
@@ -182,10 +277,14 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
 
     logger.info("Recording started... (silence threshold: %.0f)", silence_threshold)
 
-    for i in range(max_chunks):
+    for i in range(max_chunks if stream is not None else 0):
         if shutdown.is_shutting_down():
             break
-        data = stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+        try:
+            data = stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+        except OSError as e:
+            mic_failed(e)              # keep what was recorded so far
+            break
         frames.append(data)
 
         volume = _rms(data)
@@ -198,14 +297,14 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
             logger.info("Silence detected, stopping recording.")
             break
     else:
-        logger.info("Hit max recording duration (%ss), stopping.", config.RECORD_MAX_SECONDS)
+        if stream is not None:
+            logger.info("Hit max recording duration (%ss), stopping.", config.RECORD_MAX_SECONDS)
 
-    stream.stop_stream()
-    stream.close()
+    _close(stream)
 
     with wave.open(config.TEMP_AUDIO_PATH, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
+        wf.setsampwidth(2)                                   # 16-bit samples
         wf.setframerate(config.SAMPLE_RATE)
         wf.writeframes(b"".join(frames))
 

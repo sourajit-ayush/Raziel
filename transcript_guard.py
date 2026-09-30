@@ -296,7 +296,8 @@ def _vocab_forms(custom_vocabulary: Iterable[str]) -> List[str]:
 
 def filter_transcript(text: str, custom_vocabulary: Iterable[str] = (), nsp: float = 0.0,
                       alp: float = 0.0, stats: Optional[AudioStats] = None,
-                      protected_phrases: Optional[Iterable[str]] = None) -> Tuple[bool, str]:
+                      protected_phrases: Optional[Iterable[str]] = None,
+                      hint_terms: Iterable[str] = ()) -> Tuple[bool, str]:
     """Text-level rules. Returns (ok, reason). See module docstring for why each exists."""
     norm = normalize(text)
     if not norm:
@@ -327,6 +328,20 @@ def filter_transcript(text: str, custom_vocabulary: Iterable[str] = (), nsp: flo
     if any(p and p in norm for p in protected):
         return True, ""          # "goodbye" / "go to sleep" always get through
 
+    # Prompt echo, form 3: nothing but the names Whisper was primed with, three or more
+    # or one of them twice ("Arijit Singh, Fazal Arijit Singh, Fazal" - Whisper reciting
+    # its prompt over a song). ("Mom and Dad" - two names once each - is a real answer.)
+    hints = _vocab_forms(list(custom_vocabulary or []) + list(hint_terms or []))
+    if hints:
+        rest, hits, repeated = f" {norm} ", 0, False
+        for v in hints:                                   # longest first
+            rest, n = re.subn(rf"(?<=\s){re.escape(v)}(?=\s)", " ", rest)
+            hits += n
+            repeated = repeated or n > 1
+        rest = re.sub(r"(?<=\s)(?:and|or|the|a)(?=\s)", " ", rest)
+        if not rest.strip() and (hits >= 3 or repeated):
+            return False, "nothing but the hint names, recited (prompt echo)"
+
     # Prompt echo, form 2: the bare name and nothing else. Real (someone testing
     # "Arijit Singh") or echo - so trust it only when Whisper is confident.
     if vocab:
@@ -346,7 +361,7 @@ def filter_transcript(text: str, custom_vocabulary: Iterable[str] = (), nsp: flo
 
 
 def check_segments(segments, custom_vocabulary: Iterable[str] = (), stats: Optional[AudioStats] = None,
-                   protected_phrases: Optional[Iterable[str]] = None) -> GuardResult:
+                   protected_phrases: Optional[Iterable[str]] = None, hint_terms: Iterable[str] = ()) -> GuardResult:
     """
     Vet faster-whisper segments. Accepts the generator transcribe() returns (it
     is consumed once) or any list of objects/dicts with .text / .no_speech_prob /
@@ -391,7 +406,7 @@ def check_segments(segments, custom_vocabulary: Iterable[str] = (), stats: Optio
     nsp = sum(n for _t, n, _a in kept) / len(kept)
     alp = sum(a for _t, _n, a in kept) / len(kept)
 
-    ok, reason = filter_transcript(text, custom_vocabulary, nsp, alp, stats, protected_phrases)
+    ok, reason = filter_transcript(text, custom_vocabulary, nsp, alp, stats, protected_phrases, hint_terms)
     result = GuardResult(ok=ok, text=text if ok else "", reason=reason,
                          no_speech_prob=nsp, avg_logprob=alp, dropped=dropped)
     _log(result, text)

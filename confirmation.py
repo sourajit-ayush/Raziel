@@ -152,6 +152,9 @@ def request(kind: str, question: str, execute: Callable[[], str], summary: str =
     action ("send it" for a message, "overwrite it" for a file).
     """
     global _next_id, _expired
+    refusal = _voice_refusal(kind)          # the TV or a guest can't ask for this (voice_id.py)
+    if refusal:
+        return refusal
     with _lock:
         _drop_expired()
         _expired = None
@@ -170,6 +173,24 @@ def request(kind: str, question: str, execute: Callable[[], str], summary: str =
         if first:
             return question
         return lang.tr(_T, "queued", code, announcement=action.announcement)
+
+
+def _voice_refusal(kind: str) -> Optional[str]:
+    try:
+        import voice_id
+        return voice_id.guard(kind)
+    except Exception:  # noqa: BLE001 - Voice ID trouble must never block her
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
+
+
+def _voice_answer_refusal(summary: str) -> Optional[str]:
+    try:
+        import voice_id
+        return voice_id.answer_refusal(summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
 
 
 def settle(spoken: str):
@@ -421,7 +442,6 @@ def handle_transcript(transcript: str, announce: Optional[Callable[[str], None]]
 
         if answer == "yes":
             _queue.popleft()                       # removed BEFORE running: never twice
-            logger.info("Confirmation #%d (%s) approved by the user", action.id, action.kind)
             to_run = action
 
         elif answer == "no":
@@ -456,6 +476,15 @@ def handle_transcript(transcript: str, announce: Optional[Callable[[str], None]]
             lang.set_current(code)
             joined = lang.tr(_T, "and", code).join(a.summary for a in dropped)
             return Outcome(reply=lang.tr(_T, "understood_not", code, summary=joined), handled=True)
+
+    # A "yes" in someone else's voice (voice_id.py) cancels it. Checked OUTSIDE the lock: the check
+    # may wait a moment for the voice result, and others ask has_pending() meanwhile.
+    refusal = _voice_answer_refusal(to_run.summary)
+    if refusal:
+        lang.set_current(to_run.lang)
+        with _lock:
+            return Outcome(reply=_with_next(refusal), handled=True)
+    logger.info("Confirmation #%d (%s) approved by the user", to_run.id, to_run.kind)
 
     # Approved: run it OUTSIDE the lock (WhatsApp takes ~12 s to send). The result is
     # worded in the language the question was asked in, even if the answer was "yes".

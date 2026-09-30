@@ -23,6 +23,8 @@ import threading
 import time
 import webbrowser
 
+from typing import Optional
+
 import config
 import confirmation
 import instant_replies
@@ -31,6 +33,16 @@ import netutil
 import spotify_queue
 
 logger = logging.getLogger("voice_assistant")
+
+
+def _voice_refusal(kind: str):
+    """Voice ID (voice_id.py): None = go ahead, else what to say instead (it wasn't the owner's voice)."""
+    try:
+        import voice_id
+        return voice_id.guard(kind)
+    except Exception:  # noqa: BLE001 - Voice ID trouble must never block her
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
 
 
 # --- Sentences that are asked as yes/no questions (English + Hindi) ------------
@@ -164,6 +176,76 @@ def _youtube_first_video_id(query: str):
     return m.group(1) if m else None
 
 
+def _youtube_video_ids(query: str, limit: int = 10) -> list:
+    """The results' video IDs in page order (each once)."""
+    try:
+        html = netutil.get_text("https://www.youtube.com/results", params={"search_query": query, "hl": "en"},
+                                timeout=6.0)
+    except Exception as e:  # noqa: BLE001
+        logger.info("YouTube results lookup failed (%s)", e)
+        return []
+    ids = []
+    for m in re.finditer(r'"videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"', html):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+        if len(ids) >= limit:
+            break
+    if not ids:                                     # the page layout changed: any video IDs, in order
+        for m in re.finditer(r'"videoId":"([A-Za-z0-9_-]{11})"', html):
+            if m.group(1) not in ids:
+                ids.append(m.group(1))
+            if len(ids) >= limit:
+                break
+    return ids
+
+
+# The last YouTube search she opened: "play the third video" (asked twice in the log - the model
+# searched YouTube for "third video") plays the third result of it.
+_last_youtube = {"query": "", "at": 0.0}
+_ORDINALS = {"first": 1, "1st": 1, "one": 1, "second": 2, "2nd": 2, "two": 2, "third": 3, "3rd": 3, "three": 3,
+             "fourth": 4, "4th": 4, "four": 4, "fifth": 5, "5th": 5, "five": 5, "sixth": 6, "6th": 6, "six": 6,
+             "seventh": 7, "7th": 7, "eighth": 8, "8th": 8, "ninth": 9, "9th": 9, "tenth": 10, "10th": 10}
+_NTH_VIDEO_RE = re.compile(
+    r"^(?:(?:ok(?:ay)?|now|please|raziel)[\s,]+)*(?:play|open|click(?: on)?|start|put on)\s+(?:the\s+)?"
+    r"(?:(?P<ord>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|1st|2nd|3rd|4th|5th|6th|7th|"
+    r"8th|9th|10th)\s+(?:video|result|one|link)|(?:video|result)\s+(?:number\s+)?(?P<num>one|two|three|four|"
+    r"five|six|seven|eight|nine|ten|\d{1,2}))"
+    r"(?:\s+(?:on|in|from|of)\s+(?:the\s+)?(?:youtube|page|list|results|search(?: results)?|screen)"
+    r"(?:\s+page)?)?(?:\s+please)?[.!?]*$", re.IGNORECASE)
+_WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+             "ten": 10}
+
+
+def try_auto_youtube_nth(transcript: str):
+    m = _NTH_VIDEO_RE.match((transcript or "").strip())
+    if not m:
+        return None
+    word = (m.group("ord") or m.group("num") or "").lower()
+    n = _ORDINALS.get(word) or _WORD_NUM.get(word) or (int(word) if word.isdigit() else 0)
+    if not n:
+        return None
+    about_youtube = bool(re.search(r"\b(?:videos?|youtube)\b", transcript, re.IGNORECASE))
+    if not about_youtube:
+        # "open the second one" is also the file search's follow-up: only with YouTube in front
+        try:
+            import winutil
+            about_youtube = "youtube" in str(winutil.foreground_window().get("title") or "").lower()
+        except Exception:  # noqa: BLE001
+            about_youtube = False
+        if not about_youtube:
+            return None
+    if not _last_youtube["query"] or time.time() - _last_youtube["at"] > 1800:
+        return "Which search? Say, for example, play Hamdum on YouTube."
+    query = _last_youtube["query"]
+    ids = _youtube_video_ids(query, limit=max(10, n))
+    if len(ids) < n:
+        return f"I can't see a video number {n} for {query}."
+    url = f"https://www.youtube.com/watch?v={ids[n - 1]}"
+    logger.info("Deterministic YouTube result %d for %r -> %s", n, query, url)
+    webbrowser.open(url)
+    return f"Playing video {n} for {query} on YouTube."
+
+
 def open_website_search(site: str, query: str, play: bool = False) -> str:
     """Opens a website with a search already performed, e.g. YouTube results for a query.
     When play=True on a site that supports it (currently YouTube), jumps straight to playing
@@ -171,6 +253,8 @@ def open_website_search(site: str, query: str, play: bool = False) -> str:
     import urllib.parse
 
     key = site.strip().lower()
+    if key in ("youtube", "you tube") and query.strip():
+        _last_youtube.update(query=query.strip(), at=time.time())
 
     if play and key == "youtube" and query.strip():
         video_id = _youtube_first_video_id(query)
@@ -406,6 +490,11 @@ def _find_start_menu_shortcut(app_name: str):
 def open_app(app_name: str) -> str:
     """Opens an application, or a website if the name matches a known site."""
     key = app_name.strip().lower()
+    spoken = _spoken_app_name(key)
+    if spoken != key:
+        key = spoken
+        app_name = {"chatgpt": "ChatGPT", "gemini": "Gemini", "whatsapp": "WhatsApp", "spotify": "Spotify",
+                    "youtube": "YouTube"}.get(spoken, spoken)
 
     if key in APP_PREFERRED_WEBSITES:
         app_id = _find_start_app(app_name)
@@ -498,6 +587,10 @@ def open_app(app_name: str) -> str:
         return f"Opened {app_name}."
     except OSError as e:
         logger.error("Failed to open app '%s': %s", app_name, e)
+        if key == "whatsapp":
+            # (not the whatsapp: link - without the app Windows shows a "find an app" dialog instead)
+            webbrowser.open(WEBSITE_URLS["whatsapp web"])
+            return "Opened WhatsApp Web in your browser."
         return (
             f"I couldn't find {app_name} on this computer. It might not be "
             f"installed, or you can add its exact install path to "
@@ -608,26 +701,189 @@ def _search_for_folder(name: str, time_budget: float = FOLDER_SEARCH_TIME_BUDGET
     return prefix_match
 
 
+# --- your folder names ------------------------------------------------------------------------
+# "open my COA folder" was heard as "Opendazio A Folder": Whisper had never seen "COA". The names of
+# the folders on your Desktop / Documents / Downloads / OneDrive (and the top of other drives) are
+# listed in the background at start-up, saved in folder_names.json, and used three ways:
+#   - the short, unusual ones (COA, DBMS, ...) are spelling hints for Whisper (transcriber.py);
+#   - "open X folder" finds them instantly instead of walking the disk;
+#   - a name that isn't found gets "did you mean ...?" from them.
+FOLDER_NAMES_FILE = os.path.join(config._SCRIPT_DIR, "folder_names.json")
+FOLDER_SCAN_DEPTH = 3
+_folder_names_cache = {"mtime": None, "folders": []}
+_GENERIC_FOLDER_NAMES = {
+    "new folder", "images", "image", "img", "assets", "src", "lib", "bin", "build", "dist", "temp", "tmp",
+    "data", "files", "misc", "output", "outputs", "backup", "old", "test", "tests", "docs", "logs", "cache",
+    "resources", "res", "static", "public", "scripts", "include", "fonts", "icons", "desktop", "documents",
+    "downloads", "pictures", "videos", "music", "onedrive", "my music", "my pictures", "my videos",
+}
+
+
+def _folder_scan_roots():
+    home = os.path.expanduser("~")
+    roots = []
+    for sub in ("Desktop", "Documents", "Downloads", "OneDrive", os.path.join("OneDrive", "Desktop"),
+                os.path.join("OneDrive", "Documents")):
+        p = os.path.join(home, sub)
+        if os.path.isdir(p) and p not in roots:
+            roots.append((p, FOLDER_SCAN_DEPTH))
+    for letter in "DEFGH":
+        root = f"{letter}:\\"
+        if os.path.isdir(root):
+            roots.append((root, 2))
+    return roots
+
+
+def _skip_folder(name: str) -> bool:
+    low = name.lower()
+    return (low in FOLDER_SEARCH_SKIP_DIRS or low.startswith((".", "$", "~", "__")) or "site-packages" in low
+            or low in ("appdata", "application data", "local settings", "my documents"))
+
+
+def refresh_folder_names(time_budget: float = 8.0) -> int:
+    """Lists the folder names (see above). Returns how many were saved."""
+    import json
+    found, seen = [], set()
+    deadline = time.monotonic() + time_budget
+    for root, max_depth in _folder_scan_roots():
+        try:
+            for dirpath, dirnames, _files in os.walk(root):
+                if time.monotonic() >= deadline:
+                    break
+                rel = os.path.relpath(dirpath, root)
+                depth = 0 if rel == "." else rel.count(os.sep) + 1
+                dirnames[:] = [d for d in dirnames if not _skip_folder(d)]
+                for d in dirnames:
+                    full = os.path.join(dirpath, d)
+                    if full.lower() not in seen:
+                        seen.add(full.lower())
+                        found.append([d, full, depth + 1])
+                if depth + 1 >= max_depth:
+                    dirnames[:] = []
+        except OSError:
+            continue
+        if len(found) >= 5000:
+            break
+    try:
+        with open(FOLDER_NAMES_FILE, "w", encoding="utf-8") as f:
+            json.dump({"folders": found[:5000], "saved": time.time()}, f, ensure_ascii=False)
+    except OSError as e:
+        logger.debug("Couldn't save the folder names: %s", e)
+        return 0
+    logger.info("Folder names: %d saved (for 'open X folder' and as spelling hints)", len(found))
+    return len(found)
+
+
+def refresh_folder_names_async(delay: float = 25.0):
+    def work():
+        time.sleep(delay)
+        try:
+            refresh_folder_names()
+        except Exception as e:  # noqa: BLE001
+            logger.info("Couldn't list the folder names (%s)", e)
+    threading.Thread(target=work, name="folder-names", daemon=True).start()
+
+
+def folder_entries() -> list:
+    """[(name, path, depth)] as last listed ([] if never)."""
+    import json
+    try:
+        mtime = os.path.getmtime(FOLDER_NAMES_FILE)
+    except OSError:
+        return []
+    if _folder_names_cache["mtime"] != mtime:
+        try:
+            with open(FOLDER_NAMES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            rows = [(str(r[0]), str(r[1]), int(r[2])) for r in (data.get("folders") or [])
+                    if isinstance(r, (list, tuple)) and len(r) >= 3]
+        except Exception:  # noqa: BLE001
+            rows = []
+        _folder_names_cache.update(mtime=mtime, folders=rows)
+    return list(_folder_names_cache["folders"])
+
+
+def folder_hint_names(limit: int = 15) -> list:
+    """The folder names worth teaching Whisper: short acronyms first (COA, DBMS), then other short,
+    unusual names near the top of Desktop / Documents."""
+    acronyms, others = [], []
+    for name, _path, depth in folder_entries():
+        n = " ".join(name.split())
+        if not n or n.lower() in _GENERIC_FOLDER_NAMES or not any(ch.isalpha() for ch in n):
+            continue
+        if re.fullmatch(r"[A-Z][A-Z0-9]{1,5}", n) and depth <= 3:
+            acronyms.append(n)
+        elif depth <= 1 and len(n) <= 24 and len(n.split()) <= 3 and not re.search(r"\d{3,}|[_=+{}\[\]]", n):
+            others.append(n)
+    out = list(dict.fromkeys(acronyms + others))
+    return out[:max(0, int(limit))]
+
+
+_SPELLED_RE = re.compile(r"^(?:[a-z][\s.]+){1,5}[a-z]\.?$", re.IGNORECASE)
+
+
+def _folder_key(name: str) -> str:
+    """ "the C.O.A." / "c o a" / "My COA" -> "coa"."""
+    n = (name or "").strip().strip("\"'")
+    n = re.sub(r"^(?:the|my|our|a)\s+", "", n, flags=re.IGNORECASE)
+    if _SPELLED_RE.match(n):
+        n = re.sub(r"[\s.]", "", n)
+    return re.sub(r"\s+", " ", n).strip().lower()
+
+
+def _cached_folder(name: str):
+    """The saved folder with this name (shallowest first), or None."""
+    key = _folder_key(name)
+    if not key:
+        return None
+    squash = re.sub(r"[^a-z0-9]", "", key)
+    best = None
+    for fname, path, depth in folder_entries():
+        low = fname.lower()
+        if low == key or (squash and re.sub(r"[^a-z0-9]", "", low) == squash):
+            if (best is None or depth < best[1]) and os.path.isdir(path):
+                best = (path, depth)
+    return best[0] if best else None
+
+
+def _folder_suggestions(name: str, n: int = 3) -> list:
+    key = _folder_key(name)
+    names = {}
+    for fname, _p, depth in folder_entries():
+        if depth <= 3:
+            names.setdefault(fname.lower(), fname)
+    close = difflib.get_close_matches(key, list(names), n=n, cutoff=0.6)
+    return [names[c] for c in close]
+
+
 def open_folder(folder_name: str) -> str:
     """Opens a specific folder in File Explorer, by name or path. Checks the common folders
     first, then a literal path, then searches Program Files/the user's profile/other drives
     for a folder with that name (bounded search, see _search_for_folder)."""
-    key = folder_name.strip().lower()
-    raw_path = KNOWN_FOLDERS.get(key, folder_name)
+    folder_name = str(folder_name or "").strip()
+    key = folder_name.lower()
+    raw_path = KNOWN_FOLDERS.get(key, KNOWN_FOLDERS.get(_folder_key(folder_name), folder_name))
     path = os.path.expanduser(os.path.expandvars(raw_path))
 
     logger.info("Attempting to open folder: %s -> %s", folder_name, path)
 
     if not os.path.isdir(path):
-        found = None
-        try:
-            found = _search_for_folder(folder_name)
-        except Exception as e:
-            logger.warning("Folder search for '%s' failed: %s", folder_name, e)
+        found = _cached_folder(folder_name)
+        if found:
+            logger.info("Folder found in the saved folder names: %s -> %s", folder_name, found)
+        else:
+            try:
+                found = _search_for_folder(_folder_key(folder_name) or folder_name)
+            except Exception as e:
+                logger.warning("Folder search for '%s' failed: %s", folder_name, e)
         if found:
             logger.info("Folder search found: %s -> %s", folder_name, found)
             path = found
         else:
+            close = _folder_suggestions(folder_name)
+            if close:
+                options = close[0] if len(close) == 1 else ", ".join(close[:-1]) + " or " + close[-1]
+                return f"I couldn't find a folder called {folder_name}. Did you mean {options}?"
             return (
                 f"I couldn't find a folder called {folder_name} anywhere I looked "
                 f"(common folders, Program Files, your user folder, and other drives). "
@@ -716,6 +972,16 @@ def open_file(filename: str) -> str:
         return f"I couldn't open that file: {e}"
 
 
+def search_my_files(query: str) -> str:
+    """The user's own files, searched by meaning through the local index (file_index.py)."""
+    try:
+        import file_index
+        return file_index.search_tool(query)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("search_my_files failed")
+        return f"I couldn't search your files: {e}"
+
+
 def _write_file_now(safe_name: str, full_path: str, content: str, keep_backup: bool = False) -> str:
     """The actual write. Split out so an overwrite can be confirmed first."""
     logger.info("Writing file: %s", full_path)
@@ -760,6 +1026,10 @@ def write_file(filename: str, content: str) -> str:
             yes_phrases=("overwrite", "overwrite it", "replace it", "save it", "ओवरराइट", "बदल दो", "बदल दीजिए"),
         )
 
+    if os.path.isfile(full_path):
+        refusal = _voice_refusal("overwrite_file")          # no yes/no question: the voice is checked here
+        if refusal:
+            return refusal
     return _write_file_now(safe_name, full_path, content)
 
 
@@ -1256,6 +1526,9 @@ def send_whatsapp_message(contact_name: str, message: str) -> str:
             yes_phrases=("send", "send it", "भेज दो", "भेजो"),
         )
 
+    refusal = _voice_refusal("send_whatsapp_message")      # no yes/no question: the voice is checked here
+    if refusal:
+        return refusal
     return _send_whatsapp_now(who, phone, message)
 
 
@@ -1363,6 +1636,9 @@ def _copy_to_clipboard(text: str) -> bool:
 
 def compose_email(subject: str = "", body: str = "", to: str = "") -> str:
     """Opens a pre-filled email draft. Never sends anything."""
+    refusal = _voice_refusal("compose_email")
+    if refusal:
+        return refusal
     to, subject = (to or "").strip(), " ".join((subject or "").split())
     body = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not body:
@@ -1437,6 +1713,20 @@ def _spotify_precheck() -> str:
     return ""
 
 
+def _spotify_scope() -> str:
+    """The Spotify permissions to ask for. user-library-* (Liked Songs) only when the thumbs-up gesture is
+    set up (gestures.py): then a login saved without it is asked for once more - the browser opens on the
+    next Spotify command. Without gestures nothing changes."""
+    scope = "user-modify-playback-state user-read-playback-state playlist-read-private playlist-read-collaborative"
+    try:
+        import gestures
+        likes = (getattr(config, "GESTURES_ENABLED", True) and getattr(config, "GESTURES_LIKE", True)
+                 and os.path.isfile(gestures.model_path()))
+    except Exception:  # noqa: BLE001
+        likes = False
+    return scope + (" user-library-read user-library-modify" if likes else "")
+
+
 def _get_spotify_client():
     """Creates an authenticated Spotify client, reusing the cached login token."""
     import spotipy
@@ -1446,14 +1736,42 @@ def _get_spotify_client():
         client_id=config.SPOTIFY_CLIENT_ID,
         client_secret=config.SPOTIFY_CLIENT_SECRET,
         redirect_uri=config.SPOTIFY_REDIRECT_URI,
-        scope="user-modify-playback-state user-read-playback-state "
-        "playlist-read-private playlist-read-collaborative",
+        scope=_spotify_scope(),
         # Anchored to the project folder like every other path in config.py, so
         # the saved login is found no matter which directory main.py is run from.
         cache_path=os.path.join(config._SCRIPT_DIR, ".spotify_cache"),
         open_browser=True,
     )
     return spotipy.Spotify(auth_manager=auth_manager)
+
+
+def _pick_device(devices) -> Optional[str]:
+    """The Spotify app on THIS PC. It used to be simply the first "Computer" in the list, which can be
+    a browser tab (Web Player) or another laptop signed in to the same account - the song then
+    "played" there and nothing came out of these speakers."""
+    import socket
+    try:
+        host = socket.gethostname().lower()
+    except OSError:
+        host = ""
+    best, best_score = None, -1
+    for d in devices or []:
+        if not d or not d.get("id") or d.get("is_restricted"):
+            continue
+        name = str(d.get("name") or "").lower()
+        kind = str(d.get("type") or "")
+        if kind != "Computer":
+            continue
+        score = 1
+        if "web player" in name:
+            score = 0
+        if host and (name == host or host in name or name in host):
+            score += 4
+        if d.get("is_active"):
+            score += 2
+        if score > best_score:
+            best, best_score = d["id"], score
+    return best
 
 
 def _find_spotify_device(sp, wait_for_launch: bool = False):
@@ -1471,11 +1789,107 @@ def _find_spotify_device(sp, wait_for_launch: bool = False):
         except Exception as e:
             logger.error("Failed to fetch Spotify devices: %s", e)
             return None
-        for d in devices:
-            if d.get("type") == "Computer":
-                return d["id"]
+        found = _pick_device(devices)
+        if found:
+            return found
         _time.sleep(1.5)
     return None
+
+
+# "play Kalyani" played "KALYANI (with Shreya Ghoshal) - Remix by ARJN": Spotify's first hit. The
+# original is chosen unless you asked for a remix / lofi / slowed version yourself.
+_MUSIC_VARIANT_RE = re.compile(
+    r"\b(remix(?:ed)?|lo-?fi|slowed|reverb|sped up|speed up|8d|cover|karaoke|instrumental|mashup|nightcore|"
+    r"bass boosted|reprise|unplugged|acoustic|live|flip|bootleg|phonk|lofi|jhankar|dj)\b", re.IGNORECASE)
+
+
+def _norm_words(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (text or "").lower())).strip()
+
+
+def _pick_track(items, query: str):
+    """The best of Spotify's search results for what was said."""
+    q = _norm_words(query)
+    q_words = set(q.split())
+    wanted = {v.lower() for v in _MUSIC_VARIANT_RE.findall(query or "")}
+
+    def score(pair):
+        i, t = pair
+        name = str(t.get("name") or "")
+        low = _norm_words(name)
+        title = _norm_words(re.split(r"\s[-(\[]|\(|\[", name)[0])
+        artists = " ".join(_norm_words(a.get("name", "")) for a in t.get("artists") or [])
+        s = (t.get("popularity") or 0) / 100.0 - i * 0.03
+        variants = {v.lower() for v in _MUSIC_VARIANT_RE.findall(name)} - wanted
+        if variants:
+            s -= 1.0
+        if title and title == q:
+            s += 0.8
+        elif title and (title in q or q in title):
+            s += 0.4
+        title_words = set(title.split())
+        if title_words and title_words <= q_words and q_words - title_words:
+            # "kalyani arijit" - the rest of the words should be the artist
+            if all(w in artists.split() for w in q_words - title_words):
+                s += 0.6
+        elif q_words and q_words <= set(low.split()) | set(artists.split()):
+            s += 0.2
+        return s
+
+    ranked = sorted(enumerate(items), key=score, reverse=True)
+    return ranked[0][1]
+
+
+def _playing_now(sp):
+    try:
+        pb = sp.current_playback()
+    except Exception as e:  # noqa: BLE001
+        logger.info("Spotify: couldn't read what is playing (%s)", e)
+        return None
+    return pb or {}
+
+
+def _confirm_playing(sp, device_id: str, uri: str = "", context_uri: str = "", waits=(1.2, 1.5)) -> bool:
+    """Spotify accepts a play request and sometimes plays nothing (the app not ready yet, another
+    device active). Checks; one retry that moves playback to this PC first."""
+    def state():
+        """True = it plays what was asked; "other" = something else plays (maybe not updated yet, or
+        Spotify swapped in another release of the song); False = nothing plays."""
+        pb = _playing_now(sp)
+        if pb is None:
+            return True                    # can't tell - don't claim a failure we can't see
+        if not pb.get("is_playing"):
+            return False
+        item = pb.get("item") or {}
+        if uri:
+            linked = str((item.get("linked_from") or {}).get("uri") or "")
+            return True if uri in (str(item.get("uri") or ""), linked) else "other"
+        return True
+
+    def ok():
+        st = state()
+        if st == "other":
+            time.sleep(1.0)
+            st = state()
+        return st is not False             # something is playing: never restart it
+
+    time.sleep(waits[0])
+    if ok():
+        return True
+    logger.info("Spotify: accepted the request but isn't playing it - moving playback here and trying again")
+    try:
+        sp.transfer_playback(device_id=device_id, force_play=True)
+        time.sleep(0.6)
+        if uri:
+            sp.start_playback(device_id=device_id, uris=[uri])
+        elif context_uri:
+            sp.start_playback(device_id=device_id, context_uri=context_uri)
+        else:
+            sp.start_playback(device_id=device_id)
+    except Exception as e:  # noqa: BLE001
+        logger.info("Spotify: the retry failed (%s)", e)
+    time.sleep(waits[1])
+    return ok()
 
 
 def play_music(query: str = "") -> str:
@@ -1509,18 +1923,26 @@ def play_music(query: str = "") -> str:
             "yet. Try asking again in a few seconds."
         )
 
+    query = (query or "").strip()
+    if query.lower() in ("music", "any music", "some music", "a song", "any song", "something", "songs",
+                         "a random song", "random music", "random song", "anything"):
+        query = ""
     try:
         if query:
-            results = sp.search(q=query, type="track", limit=5)
+            results = sp.search(q=query, type="track", limit=10)
             raw_items = results.get("tracks", {}).get("items") or []
             items = [i for i in raw_items if i]  # Spotify's search API sometimes
                                                    # returns null entries in results -
                                                    # a known, documented API quirk
             if not items:
                 return f"I couldn't find a song matching '{query}' on Spotify."
-            track = items[0]
-            sp.start_playback(device_id=device_id, uris=[track["uri"]])
+            track = _pick_track(items, query)
             artist = track["artists"][0]["name"] if track.get("artists") else ""
+            logger.info("Spotify: %r -> %s by %s", query, track.get("name"), artist)
+            sp.start_playback(device_id=device_id, uris=[track["uri"]])
+            if not _confirm_playing(sp, device_id, uri=track["uri"]):
+                return (f"I asked Spotify to play {track['name']}, but it isn't playing. "
+                        "Is Spotify open and signed in on this PC?")
             return f"Playing {track['name']} by {artist} on Spotify."
         else:
             results = sp.search(q="Today's Top Hits", type="playlist", limit=5)
@@ -1529,12 +1951,82 @@ def play_music(query: str = "") -> str:
             if items:
                 playlist = items[0]
                 sp.start_playback(device_id=device_id, context_uri=playlist["uri"])
+                if not _confirm_playing(sp, device_id, context_uri=playlist["uri"]):
+                    return "I asked Spotify to play some music, but it isn't playing. Is Spotify open and signed in?"
                 return f"Playing {playlist['name']} on Spotify."
             sp.start_playback(device_id=device_id)
+            if not _confirm_playing(sp, device_id):
+                return "I asked Spotify to play, but it isn't playing. Is Spotify open and signed in?"
             return "Playing music on Spotify."
     except Exception as e:
         logger.error("Spotify playback failed: %s", e)
         return f"I couldn't start playback: {e}"
+
+
+# --- your playlist names, for Whisper -----------------------------------------------------------
+# "play my Crazy playlist" over music came out as "graphic playlist". The names of your playlists are
+# handed to Whisper as spelling hints (transcriber.py), so they are heard as themselves. They are
+# saved whenever the playlists are fetched, and refreshed in the background at start-up with the
+# saved Spotify login only (never a login page).
+PLAYLIST_NAMES_FILE = os.path.join(config._SCRIPT_DIR, "spotify_playlists.json")
+_playlist_names_cache = {"mtime": None, "names": []}
+
+
+def _save_playlist_names(playlists) -> None:
+    import json
+    names = [str(p.get("name") or "").strip() for p in playlists if p and p.get("name")]
+    names = [n for n in dict.fromkeys(names) if n][:50]
+    if not names:
+        return
+    try:
+        with open(PLAYLIST_NAMES_FILE, "w", encoding="utf-8") as f:
+            json.dump({"names": names, "saved": time.time()}, f, ensure_ascii=False)
+    except OSError as e:
+        logger.debug("Couldn't save the playlist names: %s", e)
+
+
+def playlist_names() -> list:
+    """The names of your Spotify playlists as last seen ([] if never fetched)."""
+    import json
+    try:
+        mtime = os.path.getmtime(PLAYLIST_NAMES_FILE)
+    except OSError:
+        return []
+    if _playlist_names_cache["mtime"] != mtime:
+        try:
+            with open(PLAYLIST_NAMES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            names = [str(n) for n in (data.get("names") or []) if isinstance(n, str) and n.strip()]
+        except Exception:
+            names = []
+        _playlist_names_cache.update(mtime=mtime, names=names)
+    return list(_playlist_names_cache["names"])
+
+
+def refresh_playlist_names() -> bool:
+    """Fetch the playlist names with the saved login only (no browser, no waiting). True = saved."""
+    try:
+        import spotify_auth
+        sp = spotify_auth.saved_login_client("playlist-read-private", timeout=6)
+        if sp is None:
+            return False
+        items, results = [], sp.current_user_playlists(limit=50)
+        while results and len(items) < 200:
+            items.extend([p for p in results.get("items", []) if p])
+            results = sp.next(results) if results.get("next") else None
+        _save_playlist_names(items)
+        logger.info("Spotify: %d playlist names saved as spelling hints for Whisper", len(items))
+        return bool(items)
+    except Exception as e:  # noqa: BLE001
+        logger.info("Spotify: couldn't refresh the playlist names (%s)", e)
+        return False
+
+
+def refresh_playlist_names_async(delay: float = 20.0):
+    def work():
+        time.sleep(delay)
+        refresh_playlist_names()
+    threading.Thread(target=work, name="playlist-names", daemon=True).start()
 
 
 def play_playlist(playlist_name: str) -> str:
@@ -1573,8 +2065,10 @@ def play_playlist(playlist_name: str) -> str:
 
     if not playlists:
         return "I couldn't find any playlists in your Spotify library."
+    _save_playlist_names(playlists)
 
-    key = playlist_name.strip().lower()
+    key = re.sub(r"\s+playlist$", "", playlist_name.strip().lower()).strip()
+    key = re.sub(r"^(?:my|the)\s+", "", key).strip() or playlist_name.strip().lower()
     match = None
 
     for p in playlists:
@@ -1601,6 +2095,9 @@ def play_playlist(playlist_name: str) -> str:
 
     try:
         sp.start_playback(device_id=device_id, context_uri=match["uri"])
+        if not _confirm_playing(sp, device_id, context_uri=match["uri"]):
+            return (f"I asked Spotify to play your playlist {match['name']}, but it isn't playing. "
+                    "Is Spotify open and signed in on this PC?")
         return f"Playing your playlist {match['name']} on Spotify."
     except Exception as e:
         logger.error("Failed to start playlist playback: %s", e)
@@ -1767,6 +2264,8 @@ AI_CHAT_SITES = {
     "perplexity": ("perplexity",),
     "copilot": ("copilot",),
 }
+# How Whisper hears these names ("JetGPT", "chat gbt", "Jemini"): ai_sites.py.
+from ai_sites import SITE_WORDS as _AI_SITE_WORDS, canonical as canonical_ai_site  # noqa: E402
 
 
 def _wait_for_site_focus(keywords, timeout: float):
@@ -1790,24 +2289,23 @@ def _wait_for_site_focus(keywords, timeout: float):
         time.sleep(0.4)
 
 
-def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
-    """Opens an AI chat site (ChatGPT, Gemini, Claude, ...) - or its installed app, if
-    one is found, same preference order as open_app - waits for it to get the keyboard
-    focus, then types `message` into it and presses Enter to submit. These sites all
-    auto-focus their message box on load, so nothing needs to be clicked first."""
-    key = site.strip().lower()
+def _type_into_ai_site(site: str, message: str):
+    """The typing itself. Returns (reply, typed_ok, hwnd, page_text_before) - hwnd / page text let
+    ai_answers.py find the answer that appears afterwards."""
+    key = canonical_ai_site(site) or site.strip().lower()
+    site = _AI_DISPLAY.get(key, site)
     if key not in AI_CHAT_SITES:
         known = ", ".join(sorted({"chatgpt", "gemini", "claude", "perplexity", "copilot"}))
-        return f"I don't know how to type into {site or 'that'} yet. I can do this for: {known}."
+        return f"I don't know how to type into {site or 'that'} yet. I can do this for: {known}.", False, 0, None
     message = (message or "").strip()
     if not message:
-        return f"What should I type into {site}?"
+        return f"What should I type into {site}?", False, 0, None
 
     try:
         import winutil
     except Exception:                          # noqa: BLE001
         logger.exception("winutil not available - can't type into %s", key)
-        return _t("feature_missing")
+        return _t("feature_missing"), False, 0, None
 
     logger.info("Opening %s to type into it", key)
     open_app(key)  # reuses open_app's real-app-first / website-fallback resolution
@@ -1818,7 +2316,7 @@ def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
     if front is False:
         logger.error("%s never came to the front within %ss - not typing", key, timeout)
         return (f"I opened {site}, but it never came to the front, so I didn't type "
-                f"anything - switch to it and ask me again.")
+                f"anything - switch to it and ask me again."), False, 0, None
 
     # The page itself needs a moment to load and render its message box, even once the
     # browser/app window has focus - don't touch the keyboard/mouse during this window,
@@ -1826,7 +2324,17 @@ def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
     time.sleep(float(getattr(config, "AI_CHAT_TYPE_DELAY", 3)))
     if front is not None and _wait_for_site_focus(keywords, 0) is False:
         logger.error("Focus left %s while the page was loading - not typing", key)
-        return f"I opened {site}, but another window took the focus while it was loading, so I didn't type anything."
+        return (f"I opened {site}, but another window took the focus while it was loading, "
+                f"so I didn't type anything."), False, 0, None
+
+    hwnd, before = 0, None
+    if getattr(config, "AI_CHAT_READ_ANSWER", True):
+        try:
+            import ai_answers
+            hwnd = int(winutil.foreground_window().get("hwnd") or 0)
+            before = ai_answers.page_text(hwnd)          # the page before the question, to spot the answer
+        except Exception:                                 # noqa: BLE001
+            logger.debug("Couldn't snapshot the page before typing", exc_info=True)
 
     try:
         winutil.type_text(message)
@@ -1834,12 +2342,74 @@ def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
     except OSError as e:
         logger.warning("Couldn't type into %s: %s", key, e)
         if "windows only" in str(e).lower():
-            return "Typing into a website only works on Windows."
+            return "Typing into a website only works on Windows.", False, 0, None
         return (f"I opened {site}, but Windows blocked the keystrokes (probably because "
-                f"something there is running as administrator), so I didn't finish typing.")
+                f"something there is running as administrator), so I didn't finish typing."), False, 0, None
 
     logger.info("Typed into %s: %r", key, message)
-    return f"Typed that into {site}."
+    _ai_state.update(site=key, at=time.time())
+    return f"Typed that into {site}.", True, hwnd, before
+
+
+_AI_DISPLAY = {"chatgpt": "ChatGPT", "chat gpt": "ChatGPT", "gemini": "Gemini", "claude": "Claude",
+               "perplexity": "Perplexity", "copilot": "Copilot"}
+# The AI chat she typed into last, and a question she is waiting for ("open Gemini and type" was cut off).
+_ai_state = {"site": "", "at": 0.0, "pending_site": "", "pending_until": 0.0}
+
+
+_DANGLING_WORDS = {"a", "an", "the", "i", "it", "is", "what", "that", "this", "to", "in", "and", "so", "um", "uh",
+                   "hmm", "about", "me", "my", "how", "why", "who", "where", "when", "which", "can", "do", "of"}
+
+
+def _looks_cut_off(message: str) -> bool:
+    """ "Open Gemini and type A" - the message is nothing, one letter or a dangling word: the sentence was cut
+    off (you were still thinking). "hi" or "ok" are real messages."""
+    m = re.sub(r"[^\w\s]", "", message or "").strip().lower()
+    return len(m) <= 1 or m in _DANGLING_WORDS
+
+
+def type_into_ai_site(site: str = "", message: str = "", **_ignored) -> str:
+    """Opens an AI chat site (ChatGPT, Gemini, Claude, ...) - or its installed app, if
+    one is found, same preference order as open_app - waits for it to get the keyboard
+    focus, then types `message` into it and presses Enter to submit. These sites all
+    auto-focus their message box on load, so nothing needs to be clicked first.
+    (The LLM tool. The answer is read out in the background once it is written.)"""
+    key = canonical_ai_site(site) or site.strip().lower()
+    if key in AI_CHAT_SITES and _looks_cut_off(message):
+        return _ask_for_ai_question(key)
+    reply, ok, hwnd, before = _type_into_ai_site(site, message)
+    if ok and getattr(config, "AI_CHAT_READ_ANSWER", True):
+        try:
+            import ai_answers
+            later = ai_answers.read_later(site.strip().lower(), hwnd, message.strip(), before)
+            if later:
+                return f"{reply} {later}"
+        except Exception:                                 # noqa: BLE001
+            logger.exception("Couldn't start reading the AI answer")
+    return reply
+
+
+def _ask_for_ai_question(key: str) -> str:
+    """Opens the chat and waits for the question: the next thing you say is typed, sent and answered."""
+    open_app(key)
+    _ai_state.update(pending_site=key, pending_until=time.time() + float(getattr(config, "AI_CHAT_QUESTION_WAIT", 45)))
+    return f"{_AI_DISPLAY.get(key, key.title())} is open. What should I ask it?"
+
+
+def type_into_ai_site_and_read(site: str, message: str):
+    """'open ChatGPT and ask X': types it, then (a streamed reply) waits for the answer and reads it."""
+    key = canonical_ai_site(site) or site.strip().lower()
+    if key in AI_CHAT_SITES and _looks_cut_off(message):
+        return _ask_for_ai_question(key)
+    reply, ok, hwnd, before = _type_into_ai_site(site, message)
+    if not ok or not getattr(config, "AI_CHAT_READ_ANSWER", True):
+        return reply
+    try:
+        import ai_answers
+        return ai_answers.answer_stream(key, hwnd, message.strip(), before)
+    except Exception:                                     # noqa: BLE001
+        logger.exception("Couldn't start reading the AI answer")
+        return reply
 
 
 def _schema(name: str, description: str, properties=None, required=()):
@@ -1991,6 +2561,23 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_my_files",
+            "description": "Search the user's own files (Documents, Downloads, Desktop) by meaning, offline, e.g. 'the PDF about the bank loan' or 'anything about my car insurance'. Returns the best matching files with a short excerpt each. Use it when the user asks what is in their files or where a document is and doesn't know its name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What the file is about, e.g. 'bank loan agreement' or 'python experience resume'.",
+                    }
+                },
+                "required": ["query"],
             },
         },
     },
@@ -2257,6 +2844,7 @@ TOOL_FUNCTIONS = {
     "open_app": open_app,
     "open_folder": open_folder,
     "open_file": open_file,
+    "search_my_files": search_my_files,
     "open_website_search": open_website_search,
     "write_file": write_file,
     "web_search": web_search,
@@ -2456,10 +3044,12 @@ def try_auto_open_site_action(transcript: str):
 # this exact phrasing proved unreliable.
 
 _AI_CHAT_ACTION_RE = re.compile(
-    r"^open (chatgpt|chat gpt|gemini|claude|perplexity|copilot) and "
-    r"(?:type|ask(?: it)?|say|tell it|write)(?:\s+that)?\s+(.+)$",
+    rf"^(?:open|launch|go to|start)\s+(?:the\s+)?({_AI_SITE_WORDS})(?:\s+app)?\s*(?:,|and|and then|then)\s+"
+    r"(?:type|ask(?: it)?|say|tell it|write|search|type in|enter)(?:\s+that|\s+in|\s+it(?=[\s,:.]|$))?[\s,:.]*(.*)$",
     re.IGNORECASE,
 )
+# "ask Gemini what AI is" / "ask ChatGPT about black holes"
+_AI_ASK_RE = re.compile(rf"^ask\s+(?:the\s+)?({_AI_SITE_WORDS})\s+(?:about\s+|that\s+|,\s*)?(.+)$", re.IGNORECASE)
 
 
 def try_auto_type_into_ai_site(transcript: str):
@@ -2474,15 +3064,99 @@ def try_auto_type_into_ai_site(transcript: str):
     discard. The message group is "(.+)$" anchored to the true end of the string
     either way, so skipping the rstrip only changes what ends up IN that group."""
     text = _strip_filler_prefix(transcript.strip())
-    m = _AI_CHAT_ACTION_RE.match(text)
+    m = _AI_CHAT_ACTION_RE.match(text) or _AI_ASK_RE.match(text)
     if not m:
         return None
-    site = m.group(1).strip().lower()
+    site = canonical_ai_site(m.group(1)) or m.group(1).strip().lower()
     message = m.group(2).strip()
-    if not message:
-        return None
     logger.info("Deterministic AI-chat-site request matched: site=%s message=%r", site, message)
-    return type_into_ai_site(site, message)
+    return type_into_ai_site_and_read(site, message)
+
+
+# --- "send it and read me the answer" / "read me the answer" (ChatGPT / Gemini in front) -------------------
+# The log: "Okay, type. What is AI?" typed the question into Gemini, then "Send it and read me the answer."
+# had no handler at all - the model repeated an old error. The question is typed, so: Enter, then the
+# answer is read exactly as for "open Gemini and ask X".
+_AI_POLITE = r"^(?:(?:ok|okay|now|and|please|raziel|then|so|alright|yes|yeah)[\s,]+)*"
+_AI_READ_TAIL = (r"(?:read (?:me |out )?(?:the |its |it'?s |that )?(?:answer|reply|response|result)(?: out)?(?: to me)?|"
+                 r"read (?:it|that)(?: out)?(?: to me)?|tell me (?:the answer|what it says|what it said)|"
+                 r"what does it say)")
+_AI_SEND_RE = re.compile(
+    _AI_POLITE + r"(?:(?P<send>send it|send that|send (?:the |this )?(?:message|question)|send|press enter|hit enter|"
+    r"press (?:the )?enter(?: key| button)?|submit(?: it| that)?|enter|click send)"
+    r"|(?P<misheard>peter|inter|entre|center))"
+    rf"(?:\s*(?:,|and|then|and then)?\s+(?P<read>{_AI_READ_TAIL}))?(?:[\s,]+(?:please|now))*[.!?]*$", re.IGNORECASE)
+_AI_READ_RE = re.compile(_AI_POLITE + _AI_READ_TAIL + r"(?:[\s,]+(?:please|now))*[.!?]*$", re.IGNORECASE)
+
+
+def _ai_site_in_front():
+    """(site_key, hwnd) of the ChatGPT / Gemini / ... window in front, or (None, 0)."""
+    try:
+        import winutil
+        w = winutil.foreground_window()
+    except Exception:  # noqa: BLE001
+        return None, 0
+    title = str(w.get("title") or "").lower()
+    for key, words in AI_CHAT_SITES.items():
+        if any(k in title for k in words):
+            return ("chatgpt" if key == "chat gpt" else key), int(w.get("hwnd") or 0)
+    return None, 0
+
+
+def try_auto_ai_send(transcript: str):
+    t = re.sub(r"\s+", " ", (transcript or "").strip())
+    m = _AI_SEND_RE.match(t)
+    read_only = None if m else _AI_READ_RE.match(t)
+    if not m and not read_only:
+        return None
+    if m and m.group("misheard") and not m.group("read"):
+        return None                                   # "Peter" on its own is just a name
+    site, hwnd = _ai_site_in_front()
+    if site is None:
+        if read_only or not m.group("read"):
+            return None                               # "send" / "read me the answer" about something else
+        recent = _ai_state["site"] and time.time() - _ai_state["at"] < 900
+        if not recent:
+            return None
+        return f"Switch to {_AI_DISPLAY.get(_ai_state['site'], 'the chat')} first, then say 'send it'."
+    try:
+        import ai_answers
+        import winutil
+    except Exception:  # noqa: BLE001
+        return None
+    prompt = ""
+    try:
+        import dictation
+        last = getattr(dictation, "last_typed", {}) or {}
+        if time.time() - float(last.get("at", 0)) < 600:
+            prompt = str(last.get("text") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    if read_only:
+        logger.info("Deterministic AI-chat read request: %s", site)
+        return ai_answers.read_current(site, hwnd, prompt)
+    logger.info("Deterministic AI-chat send request: %s (read: %s)", site, bool(m.group("read")))
+    _ai_state.update(site=site, at=time.time())
+    return ai_answers.send_and_read(site, hwnd, prompt, lambda: winutil.tap_key(winutil.VK_RETURN),
+                                    read=bool(m.group("read")) or getattr(config, "AI_CHAT_READ_ON_SEND", True))
+
+
+def try_auto_ai_followup(transcript: str):
+    """After "Gemini is open. What should I ask it?": the next sentence is the question."""
+    if not _ai_state["pending_site"] or time.time() > _ai_state["pending_until"]:
+        _ai_state["pending_site"] = ""
+        return None
+    site = _ai_state["pending_site"]
+    t = (transcript or "").strip()
+    low = re.sub(r"[^\w\s']", "", t.lower()).strip()
+    if low in ("cancel", "never mind", "nevermind", "nothing", "no", "stop", "forget it"):
+        _ai_state["pending_site"] = ""
+        return "Okay."
+    _ai_state["pending_site"] = ""
+    question = re.sub(r"^(?:ok(?:ay)?|so|type|ask(?: it)?|ask (?:him|her)|write|search(?: for)?)[\s,:.]+", "", t,
+                      flags=re.IGNORECASE).strip() or t
+    logger.info("The question for %s: %r", site, question)
+    return type_into_ai_site_and_read(site, question)
 
 
 # --- Deterministic "add X to the queue" handling ------------------------------
@@ -2596,9 +3270,28 @@ _NOT_AN_APP_WORDS = {
 }
 
 
+# How Whisper writes some app names (compared with everything but letters removed): "open what's app"
+# never matched anything and went to the model, which answered "Understood.".
+_SPOKEN_APP_NAMES = {
+    "whatsapp": "whatsapp", "whatsap": "whatsapp", "watsapp": "whatsapp", "watsap": "whatsapp",
+    "whatsup": "whatsapp", "whatsupp": "whatsapp", "whatapp": "whatsapp", "whatsappdesktop": "whatsapp",
+    "spotify": "spotify", "spotifi": "spotify", "spottyfi": "spotify", "spotfy": "spotify", "spotifai": "spotify",
+    "spotifyapp": "spotify", "spotifymusic": "spotify", "sportify": "spotify", "spotty": "spotify",
+    "youtube": "youtube", "utube": "youtube", "youtub": "youtube",
+}
+_ALWAYS_OPENABLE = {"whatsapp"}      # opened through the app, or WhatsApp Web when it isn't installed
+
+
+def _spoken_app_name(key: str) -> str:
+    ai = canonical_ai_site(key)
+    if ai:
+        return ai
+    return _SPOKEN_APP_NAMES.get(re.sub(r"[^a-z]", "", key.lower()), key)
+
+
 def _known_app_key(key: str):
     """True if key is in one of the hand-maintained app/site tables."""
-    return (key in WEBSITE_URLS or key in PROTOCOL_APPS
+    return (key in WEBSITE_URLS or key in PROTOCOL_APPS or key in _ALWAYS_OPENABLE
             or key in APP_COMMANDS or key in FULL_PATH_CANDIDATES)
 
 
@@ -2622,6 +3315,31 @@ def _resolve_installed_app(key: str, loose: bool) -> bool:
     return bool(difflib.get_close_matches(key, names, n=1, cutoff=0.8))
 
 
+_OPEN_FOLDER_RE = re.compile(
+    r"^(?:open|show(?: me)?|go to|launch|take me to)\s+(?:up\s+)?(?:(?:my|the|our)\s+)?(?P<name>.+?)\s+"
+    r"(?:folder|directory)(?:\s+(?:in|on|with|using)\s+(?:the\s+)?(?:file (?:manager|explorer)|explorer|"
+    r"windows explorer|this pc))?(?:\s+(?:please|for me|now))?$", re.IGNORECASE)
+
+
+def try_auto_open_folder(transcript: str):
+    """ "open my COA folder" / "open the Personal Documents folder in file manager" -> opens it now
+    (it went to the model before, which is slower and guessed names)."""
+    text = _strip_filler_prefix((transcript or "").strip()).rstrip(".!?").strip()
+    m = _OPEN_FOLDER_RE.match(text)
+    if not m:
+        return None
+    name = m.group("name").strip(" ,")
+    if not name or len(name.split()) > 5 or re.search(
+            r"\b(?:and|then|in|inside|of|from|what|what's|whats|which|where|files?|everything|contents?|"
+            r"parent|previous|last|recent|current|this|that)\b", name, re.IGNORECASE):
+        return None                                   # "show me the files in my documents folder" -> the model
+    if _folder_key(name) in ("", "the", "a", "my", "our", "new", "that", "this", "it", "any", "some", "which", "same",
+                             "that same", "new empty", "your", "his", "her", "their"):
+        return None                                   # "open a new folder" / "open that folder": not a name
+    logger.info("Deterministic open-folder request matched: %r", name)
+    return open_folder(name)
+
+
 def try_auto_open_app(transcript: str):
     """If transcript is 'open/launch X' and X is positively identifiable as an
     app, site or common folder, opens it directly and returns the reply.
@@ -2633,6 +3351,9 @@ def try_auto_open_app(transcript: str):
 
     verb = m.group("verb").lower()
     target = m.group("target").strip()
+    whole = _spoken_app_name(re.sub(r"^(?:the|my)\s+", "", target.lower()).strip())
+    if whole in ("whatsapp", "chatgpt", "gemini"):
+        target = whole                                # "what's app" (its "app" isn't the word app)
     for _ in range(2):
         target = _APP_LEAD_RE.sub("", target, count=1)
     for _ in range(2):
@@ -2641,6 +3362,7 @@ def try_auto_open_app(transcript: str):
 
     if len(key) < 2 or len(key.split()) > 4:
         return None
+    key = _spoken_app_name(key)
     if _MULTI_STEP_RE.search(f" {key} "):
         return None                       # "open chrome and search cats" -> LLM
     if re.search(r"\.[a-z0-9]{2,4}$", key):
@@ -2704,6 +3426,10 @@ def try_auto_screenshot(transcript: str):
 
 def try_auto_play_music(transcript: str):
     """'play X' (Spotify, no other platform named) -> straight to Spotify."""
+    name = instant_replies.parse_playlist_request(transcript, known=playlist_names())
+    if name:
+        logger.info("Deterministic playlist request matched: %r", name)
+        return play_playlist(name)
     parsed = instant_replies.parse_play_request(transcript)
     if parsed is None:
         return None

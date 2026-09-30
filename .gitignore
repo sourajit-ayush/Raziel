@@ -15,11 +15,18 @@ generated_files/
 screenshots/
 my_voice/
 avatar_transparency.json
+avatar_place.json
+gestures_state.json
+voice_profile.npz
+file_index.db
+file_index.db-wal
+file_index.db-shm
 
 # --- Large binary models (over/near GitHub's 100MB file limit, and not code) ---
 *.onnx
 *.onnx.json
 *.vrm
+models/
 
 # --- Python environment (regenerate with requirements.txt) ---
 venv/
@@ -41,3 +48,8 @@ Claude outputs/
 Thumbs.db
 .vscode/
 .idea/
+media_duck.json
+spotify_playlists.json
+gestures_debug.jsonl
+gestures_debug.old.jsonl
+folder_names.json

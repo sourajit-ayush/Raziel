@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 # ----------------------------------------------------------------- normalising
 
@@ -261,6 +261,52 @@ _LEADING_NOISE_RE = re.compile(r"^(?:song|track|tune|music)\s+(?=\S)")
 _MY_PLAYLIST_RE = re.compile(r"^my\s+(?P<n>.+?)\s+playlist$")
 
 
+# "open my Crazy playlist and play any music from that" / "play something from the Crazy playlist":
+# one request (that playlist), not two ("play any music from that" used to search Spotify for "from that").
+_ANY_MUSIC = r"(?:(?:any|some|a|the|random|good)\s+)*(?:music|songs?|tracks?|tunes?|something|anything)"
+_PL_NAME = r"(?:(?P<my>my)\s+|the\s+)?(?P<n>[a-z0-9][a-z0-9' &-]*?)\s+playlist"
+_BACK = r"(?:it|that|this|there|the playlist|that playlist|this playlist|them)"
+_PL_VERB = r"(?:start playing|open|play|start|put on|shuffle|launch|go to)"
+_OPEN_PLAYLIST_RE = re.compile(
+    rf"^{_PL_VERB}\s+(?:me\s+)?(?:up\s+)?{_PL_NAME}(?:\s+on spotify)?"
+    rf"(?:\s*(?:,|and then|and|then)\s+(?:play|shuffle|start playing|start|put on)"
+    rf"(?:\s+{_ANY_MUSIC})?(?:\s+(?:from|in|off|of|on)\s+{_BACK}|\s+(?:it|that|this|them))?)?"
+    rf"(?:\s+(?:for me|please|now))*$")
+_FROM_PLAYLIST_RE = re.compile(
+    rf"^(?:start playing|play|shuffle|put on|start)\s+(?:me\s+)?(?:{_ANY_MUSIC}\s+)?(?:from|in|off|of|out of)\s+{_PL_NAME}"
+    rf"(?:\s+on spotify)?(?:\s+(?:for me|please|now))*$")
+# "play a random playlist", "open a new playlist", "play the same / next / whole playlist": not a name.
+_PL_NOT_A_NAME = {"a", "an", "another", "our", "his", "her", "their", "your", "me", "same", "other", "next",
+                  "previous", "last", "first", "whole", "entire", "new", "different", "random", "right", "spotify",
+                  "this", "that", "any", "some", "my", "the", "from", "in", "off", "of", "out", "something",
+                  "anything", "song", "songs", "music", "track", "tracks", "playing", "current", "full"}
+
+
+def parse_playlist_request(transcript: str, known: Optional[Iterable[str]] = None) -> Optional[str]:
+    """The playlist name in "open my X playlist", "open my X playlist and play any music from that",
+    "play something from the X playlist", "play the X playlist" - or None. With `known` (your playlist
+    names), a name without "my" must be one of them ("play the whole playlist" isn't a name)."""
+    text = normalize(transcript)
+    if not text or len(text.split()) > 16:
+        return None
+    m = _FROM_PLAYLIST_RE.match(text) or _OPEN_PLAYLIST_RE.match(text)
+    if not m:
+        return None
+    name = m.group("n").strip()
+    if not name or name.split()[0] in _PL_NOT_A_NAME or _NOT_SPOTIFY_RE.search(name) or len(name.split()) > 6:
+        return None
+    if not m.group("my"):
+        names = [str(n).strip() for n in (known or []) if str(n).strip()]
+        if names:
+            lower = {n.lower(): n for n in names}
+            if name in lower:
+                return name
+            import difflib
+            close = difflib.get_close_matches(name, list(lower), n=1, cutoff=0.8)
+            return close[0] if close else None
+    return name
+
+
 def parse_play_request(transcript: str) -> Optional[Tuple[str, str]]:
     """
     "play X" -> one of
@@ -277,6 +323,8 @@ def parse_play_request(transcript: str) -> Optional[Tuple[str, str]]:
     q = _TAIL_RE.sub("", m.group("q")).strip()
     if not q or len(q.split()) > 9:
         return None
+    if re.search(r"\b(?:from|in|off|out of)\s+(?:it|that|this|there|them|those)$", q):
+        return None                       # "play any music from that": refers back to something - LLM
     if _NOT_SPOTIFY_RE.search(q) or _MULTI_STEP_RE.search(q):
         return None
     q = _ME_A_RE.sub("", q)               # "play me a song" -> "a song" (generic below)

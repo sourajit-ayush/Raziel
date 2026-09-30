@@ -1,0 +1,2120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raziel</title>
+<!--
+  avatar_orb.html - Raziel as a living orb of glowing particles.
+
+  Shown by avatar_window.py when config.AVATAR_STYLE = "orb". Talks to the voice
+  loop over the same websocket as avatar.html (avatar_server.py, port 8765):
+
+    state      idle | listening | thinking | speaking   ("idle" = asleep, waiting for "Raziel")
+    emotion    neutral happy amused sad concerned focused surprised angry confident
+    visemes    her lip-sync timeline -> the orb pulses and sends out rings as she talks
+    form       orb dragon sword knight butterfly planet heart galaxy universe
+    universe   her universe of beings (universes.py): names, colours, symbols, which one is working ("focus")
+    action     roar fire fly stay swing attack block raise   (switches to the right form first)
+    music      48 frequency bands of whatever the PC is playing (music_listener.py)
+
+  Backgrounds:
+    avatar_orb.html            see-through window (AVATAR_TRANSPARENCY = "native"). Every pixel is
+                               either fully see-through or fully drawn, because the window's
+                               see-through trick (a colour key) can't blend soft edges. So she lives
+                               inside a glass sphere: everything inside it is fully drawn and can be
+                               soft (glow, stars, trails, reflections); only its outline is a hard edge.
+    avatar_orb.html?look=float the old see-through look: bare particles, no sphere, no soft glow
+                               (AVATAR_ORB_LOOK = "float").
+    avatar_orb.html?bg=0d1017  opaque dark tile ("none"): full soft glow, stars, trails.
+  Other URL options: ?n=16000 particle count (fewer = lighter on the CPU).
+
+  Nothing is loaded from the internet (no libraries, no fonts) except the album art of the song
+  Spotify is playing, on the music card.
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  body { user-select: none; -webkit-user-select: none; cursor: default; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  canvas.cutout { image-rendering: pixelated; }   /* never blend a see-through pixel into a drawn one */
+  /* Mini cards under the orb (cards.py). Each card is a rounded glass pill painted on #cardbg; in the
+     see-through window every pixel of it is fully drawn or fully clear (the pill's outline is snapped to
+     whole pixels), so there are no shadows or fades outside it. Every size / position is a multiple of
+     4 CSS px (a whole number of screen pixels at 100 / 125 / 150 / 175 / 200 % scaling). */
+  #ulabels { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #cardbg { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; image-rendering: pixelated; }
+  #cards { position: fixed; inset: 0; pointer-events: none; }
+  .card { position: absolute; box-sizing: border-box; background: transparent; color: #eef2ff;
+          font: 13px/16px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; overflow: hidden; display: flex;
+          align-items: center; gap: 9px; padding: 0 14px; white-space: nowrap; }
+  .card .ic { font-size: 20px; line-height: 24px; flex: none; width: 24px; text-align: center; }
+  .card .main { flex: 1; min-width: 0; }
+  .card .t1 { font-weight: 600; font-size: 13px; letter-spacing: 0.1px; overflow: hidden; text-overflow: ellipsis; }
+  .card .t2 { color: #9aabd6; font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; }
+  .card .big { font: 600 23px/28px "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+               font-variant-numeric: tabular-nums; letter-spacing: -0.5px; flex: none; }
+  .card .bar { position: absolute; left: 16px; right: 16px; bottom: 7px; height: 3px; border-radius: 2px; background: #1c2742; overflow: hidden; }
+  .card .bar i { display: block; height: 100%; width: 0; border-radius: 2px; background: linear-gradient(90deg, #58b8ff, #8fe6ff); }
+  .card img { width: 44px; height: 44px; flex: none; object-fit: cover; border-radius: 8px; background: #1a2338; }
+  .card.music { padding-left: 10px; }
+  .card.note { align-items: flex-start; padding-top: 12px; }
+  .card.note .t2 { white-space: normal; max-height: 32px; }
+  .card.status { font-size: 12px; color: #c3cff2; gap: 8px; padding: 0 14px; }
+  .card.status .ic { font-size: 14px; width: 18px; }
+  .card.status .t1 { font-weight: 500; font-size: 12.5px; }
+  .card.hold { gap: 10px; }
+  .card.hold .t1 { font-weight: 500; }
+  .card.hold .bar { bottom: 6px; }
+  .card.hold .bar i { background: linear-gradient(90deg, #7fd8ff, #ffffff); }
+  .card.done .bar i { background: linear-gradient(90deg, #58c86a, #9ef08a); }
+  #nogl { position: fixed; inset: 0; display: none; place-items: center; color: #9aa6d8;
+          font: 13px/1.4 system-ui, "Segoe UI", sans-serif; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<canvas id="gl" aria-label="Raziel"></canvas>
+<canvas id="ulabels"></canvas>
+<canvas id="cardbg"></canvas>
+<div id="cards"></div>
+<div id="nogl">This window can&rsquo;t show WebGL, which the particles need.<br>Set AVATAR_STYLE = "vrm" in config.py to use the 3D avatar instead.</div>
+<script>
+(() => {
+'use strict';
+
+// ================================================================ helpers
+const TAU = Math.PI * 2;
+const GA = Math.PI * (3 - Math.sqrt(5));
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const approach = (cur, target, rate, dt) => cur + (target - cur) * (1 - Math.exp(-rate * dt));
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const fract = x => x - Math.floor(x);
+const wrapAng = a => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
+const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v); };
+const mix3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+const norm3 = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const MOTION = REDUCED ? 0.5 : 1;
+
+function rotMat(yaw, pitch, roll) {        // R = Ry(yaw) * Rx(pitch) * Rz(roll), row-major
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
+  const rz = v => [cr * v[0] - sr * v[1], sr * v[0] + cr * v[1], v[2]];
+  const rx = v => [v[0], cp * v[1] - sp * v[2], sp * v[1] + cp * v[2]];
+  const ry = v => [cy * v[0] + sy * v[2], v[1], -sy * v[0] + cy * v[2]];
+  const c = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map(v => ry(rx(rz(v))));
+  return [c[0][0], c[1][0], c[2][0], c[0][1], c[1][1], c[2][1], c[0][2], c[1][2], c[2][2]];
+}
+function applyMat(f, m, s, tx, ty, tz, from = 0, to = N) {
+  const X = f.x, Y = f.y, Z = f.z;
+  for (let i = from; i < to; i++) {
+    const x = X[i] * s, y = Y[i] * s, z = Z[i] * s;
+    X[i] = m[0] * x + m[1] * y + m[2] * z + tx;
+    Y[i] = m[3] * x + m[4] * y + m[5] * z + ty;
+    Z[i] = m[6] * x + m[7] * y + m[8] * z + tz;
+  }
+}
+function xf(m, s, t, p) {
+  const x = p[0] * s, y = p[1] * s, z = p[2] * s;
+  return [m[0] * x + m[1] * y + m[2] * z + t[0], m[3] * x + m[4] * y + m[5] * z + t[1], m[6] * x + m[7] * y + m[8] * z + t[2]];
+}
+function counts(fracs) {                   // splits N particles by fractions; the last part takes the rest
+  const out = []; let used = 0;
+  fracs.forEach((f, i) => { const n = i === fracs.length - 1 ? N - used : Math.floor(N * f); out.push(n); used += n; });
+  return out;
+}
+
+// ================================================================ page options (set by avatar_window.py)
+const PARAMS = new URLSearchParams(location.search);
+const BG_HEX = (PARAMS.get('bg') || '').replace(/[^0-9a-fA-F]/g, '');
+const OPAQUE = BG_HEX.length === 6;                     // ?bg=0d1017 -> dark tile; otherwise see-through
+const BG_RGB = OPAQUE ? [0, 2, 4].map(i => parseInt(BG_HEX.slice(i, i + 2), 16) / 255) : [0, 0, 0];
+const N = clamp(parseInt(PARAMS.get('n'), 10) || 24000, 4000, 60000);
+const WS_URL = 'ws://127.0.0.1:' + (parseInt(PARAMS.get('ws'), 10) || 8765);
+// See-through window: she lives inside a glass sphere (?look=sphere, the default) - its inside is fully
+// drawn, so it gets the full soft glow, stars and trails - or floats free as bare particles (?look=float).
+const SPHERE = !OPAQUE && (PARAMS.get('look') || 'sphere').toLowerCase() !== 'float';
+if (OPAQUE) { document.documentElement.style.background = document.body.style.background = '#' + BG_HEX; }
+
+// ================================================================ her state, driven by avatar_server.py
+// The nine emotions emotion.py / avatar_server.py use, as colours.
+const MOODS = {
+  neutral:   [0.45, 0.82, 1.00],   // her own cyan
+  happy:     [1.00, 0.76, 0.36],   // warm gold
+  amused:    [1.00, 0.56, 0.82],   // playful pink
+  sad:       [0.42, 0.52, 1.00],   // deep blue
+  concerned: [0.68, 0.60, 1.00],   // soft lavender
+  focused:   [0.40, 1.00, 0.86],   // mint
+  surprised: [1.00, 0.94, 0.58],   // bright flash
+  angry:     [1.00, 0.38, 0.32],   // ember red
+  confident: [0.76, 0.90, 1.00],   // icy white-blue
+};
+const THINK_RGB = [0.74, 0.52, 1.00];
+const SLEEP_AFTER = 1.5;           // "idle" between two sentences is not sleep; only an idle that lasts is
+
+const sim = {
+  time: 0,
+  raw: 'idle',                     // what Raziel last said her state was
+  state: 'asleep',                 // what the orb shows: asleep | listening | thinking | speaking
+  sleepAt: 0,
+  mood: 'neutral', moodK: 1, moodAt: 0,
+  awake: 0, think: 0,
+  rings: [], lastRing: -1,
+};
+
+function setRawState(s) {
+  if (!['idle', 'listening', 'thinking', 'speaking'].includes(s)) return;
+  sim.raw = s;
+  if (s === 'idle') {
+    // Asleep straight away if she already was (page load); otherwise only if it lasts.
+    sim.sleepAt = sim.state === 'asleep' ? sim.time : sim.time + SLEEP_AFTER;
+    if (sim.state === 'speaking') { sim.state = 'listening'; sim.moodAt = sim.time; }
+  } else {
+    if (sim.state === 'speaking' && s !== 'speaking') sim.moodAt = sim.time;
+    sim.state = s;
+  }
+}
+function setMood(name, intensity) {
+  const key = String(name || 'neutral').toLowerCase();
+  sim.mood = MOODS[key] ? key : 'neutral';
+  sim.moodK = clamp(intensity == null ? 1 : +intensity || 0, 0, 1);
+  sim.moodAt = sim.time;
+  if (sim.mood === 'surprised' && sim.awake > 0.5) addRing(trans ? trans.to.focus : [0, 0, 0], 0.7);
+}
+
+function addRing(center, strength) {
+  sim.rings.push({ r: 0, a: strength, c: center.slice() });
+  if (sim.rings.length > 4) sim.rings.shift();
+}
+
+// ================================================================ her voice: lip-sync timeline -> pulses
+// speaker.py sends the Piper phoneme timing of every sentence ("visemes"). Each vowel becomes a
+// syllable-shaped pulse; strong ones send a ring out of the orb.
+const VOWEL_OPEN = { aa: 1.0, oh: 0.85, ou: 0.7, ee: 0.62, ih: 0.55 };
+const voice = { tl: [], t0: 0, idx: 0, end: 0, level: 0, ext: 0, rnd: { level: 0, sylStart: 0, sylEnd: 0, gapUntil: 0, peak: 0 } };
+
+function setTimeline(seq) {
+  const tl = [];
+  for (const it of Array.isArray(seq) ? seq : []) {
+    if (!it || typeof it !== 'object') continue;
+    const t = +(it.t ?? it.time ?? 0), d = +(it.d ?? it.duration ?? 0.09), w = +(it.w ?? 1);
+    if (!isFinite(t) || !isFinite(d)) continue;
+    tl.push({ t: Math.max(0, t), d: clamp(d, 0.03, 0.6), p: (VOWEL_OPEN[it.v || it.viseme] || 0.6) * clamp(isFinite(w) ? w : 1, 0, 1.4) });
+  }
+  tl.sort((a, b) => a.t - b.t);
+  voice.tl = tl; voice.t0 = sim.time; voice.idx = 0;
+  voice.end = tl.length ? tl[tl.length - 1].t + tl[tl.length - 1].d : 0;
+}
+function randomSyllables(v, now, active, onSyllable) {          // when there is no timing to follow
+  if (!active) { v.level = approach(v.level, 0, 20, 1 / 60); return; }
+  if (now >= v.sylEnd && now >= v.gapUntil) {
+    const dur = 0.11 + Math.random() * 0.17;
+    v.sylStart = now; v.sylEnd = now + dur;
+    v.peak = 0.45 + Math.random() * 0.55;
+    const r = Math.random();
+    v.gapUntil = v.sylEnd + (r < 0.12 ? 0.28 + Math.random() * 0.25 : r < 0.45 ? 0.05 + Math.random() * 0.08 : 0);
+    if (onSyllable) onSyllable(v.peak);
+  }
+  v.level = now < v.sylEnd && v.sylEnd > v.sylStart ? v.peak * Math.pow(Math.max(0, Math.sin(Math.PI * (now - v.sylStart) / (v.sylEnd - v.sylStart))), 0.7) : 0;
+}
+function stepVoice(dt, onSyllable) {
+  const speaking = sim.state === 'speaking';
+  const rel = sim.time - voice.t0;
+  let lvl = 0;
+  if (speaking && voice.tl.length && rel <= voice.end + 0.25) {
+    const tl = voice.tl;
+    while (voice.idx < tl.length && tl[voice.idx].t + tl[voice.idx].d < rel) voice.idx++;
+    for (let j = voice.idx; j < tl.length && tl[j].t <= rel; j++) {
+      const it = tl[j], u = (rel - it.t) / it.d;
+      if (u >= 0 && u <= 1) {
+        lvl = Math.max(lvl, it.p * Math.pow(Math.sin(Math.PI * u), 0.7));
+        if (!it.fired) { it.fired = true; onSyllable(it.p); }
+      }
+    }
+    voice.rnd.level = 0;
+  } else {
+    randomSyllables(voice.rnd, sim.time, speaking, onSyllable);
+    lvl = voice.rnd.level;
+  }
+  voice.ext = approach(voice.ext, 0, 6, dt);
+  voice.level = Math.max(lvl, voice.ext);
+}
+
+// ================================================================ music, heard by music_listener.py
+// Python sends 48 log-spaced bands (30 Hz - 14 kHz) as bytes, scaled exactly like the Web Audio
+// analyser the preview used, about 30 times a second while something is playing.
+const BANDS = 48;
+const music = {
+  bytes: new Float32Array(BANDS), bands: new Float32Array(BANDS), wave: new Float32Array(128), waveIn: null,
+  energy: 0, bass: 0, beat: 0, lastBeat: -1, bassAvg: 0, energyAvg: 0, bassSlow: 0, intensity: 0,
+  period: 0, on: false, lastMsg: -9, active: false, activeFor: 0, react: true, sim: false, simT: 0,
+};
+function onMusic(msg) {
+  music.lastMsg = sim.time;
+  music.on = !!msg.on && music.react;
+  if (!music.on) { music.bytes.fill(0); return; }
+  const b = msg.b || msg.bands;
+  if (Array.isArray(b)) for (let k = 0; k < BANDS; k++) music.bytes[k] = clamp(+b[Math.floor(k * b.length / BANDS)] || 0, 0, 255);
+  if (Array.isArray(msg.w) && msg.w.length > 1) music.waveIn = msg.w.map(x => clamp(+x || 0, -128, 127) / 128);
+}
+function analyseMusic(dt) {
+  const b = music.bands;
+  let live = music.on && sim.time - music.lastMsg < 0.7;
+  if (live) {
+    for (let k = 0; k < BANDS; k++) {
+      const v = Math.pow(music.bytes[k] / 255, 1.4) * (1 + k / BANDS * 0.8);
+      b[k] = v > b[k] ? v : approach(b[k], v, 7, dt);
+    }
+    const w = music.waveIn;
+    if (w) for (let k = 0; k < 128; k++) { const f = k / 127 * (w.length - 1), j = Math.min(w.length - 2, f | 0), u = f - j; music.wave[k] = approach(music.wave[k], lerp(w[j], w[j + 1], u), 18, dt); }
+    else for (let k = 0; k < 128; k++) music.wave[k] = Math.sin(k * 0.3 + sim.time * 9) * (0.15 + music.bass * 0.5) + Math.sin(k * 1.1 - sim.time * 5) * 0.1 * music.energy;
+  } else if (music.sim) {                                   // built-in test signal (window.__orb.simMusic)
+    music.simT += dt;
+    const t = music.simT, beatLen = 60 / 118, ph = fract(t / beatLen), bar = Math.floor(t / (beatLen * 4)) % 12, hard = bar >= 5;
+    const kick = Math.exp(-ph * (hard ? 9 : 14)) * (hard ? 1 : 0.35);
+    const snare = hard ? Math.exp(-fract(t / beatLen / 2 + 0.5) * 12) * 0.7 : 0;
+    const hat = Math.exp(-fract(t / beatLen * 2) * 18) * (hard ? 0.6 : 0.25);
+    for (let k = 0; k < BANDS; k++) {
+      const x = k / BANDS;
+      let v = kick * 1.2 * Math.exp(-x * 6) + snare * Math.exp(-Math.pow((x - 0.45) * 5, 2)) + hat * Math.pow(x, 1.5)
+            + (hard ? 0.42 : 0.14) * (0.5 + 0.5 * Math.sin(t * 1.3 + k * 0.4)) * Math.exp(-Math.pow((x - 0.3) * 2.2, 2))
+            + (hard ? 0.5 * Math.exp(-x * 4) : 0);
+      v = clamp(v * (0.8 + 0.2 * Math.random()), 0, 1);
+      b[k] = v > b[k] ? v : approach(b[k], v, 7, dt);
+    }
+    for (let k = 0; k < 128; k++) music.wave[k] = Math.sin(k * 0.3 + t * 9) * (0.2 + kick * 0.6) + Math.sin(k * 1.1 - t * 5) * 0.15;
+    live = true;
+  } else {
+    for (let k = 0; k < BANDS; k++) b[k] = approach(b[k], 0, 3, dt);
+    for (let k = 0; k < 128; k++) music.wave[k] = approach(music.wave[k], 0, 3, dt);
+  }
+  let e = 0, bass = 0;
+  for (let k = 0; k < BANDS; k++) { e += b[k]; if (k < 6) bass += b[k]; }
+  music.energy = e / BANDS; music.bass = bass / 6;
+  music.bassAvg = approach(music.bassAvg, music.bass, 1.5, dt);
+  music.energyAvg = approach(music.energyAvg, music.energy, 0.35, dt);
+  music.bassSlow = approach(music.bassSlow, music.bass, 0.5, dt);
+  music.intensity = 0.5 * music.energyAvg + 0.5 * music.bassSlow;
+  if (live && music.bass > 0.3 && music.bass - music.bassAvg > 0.1 && sim.time - music.lastBeat > 0.26) {
+    const gap = sim.time - music.lastBeat;
+    if (gap > 0.3 && gap < 1.25) music.period = music.period ? lerp(music.period, gap, 0.25) : gap;   // for the heart's beat
+    music.lastBeat = sim.time; music.beat = 1;
+  }
+  music.beat *= Math.exp(-dt * 7);
+  if (music.sim) {                                          // test signal: decide from the sound itself
+    const on = music.energy > 0.04;
+    music.activeFor = on ? music.activeFor + dt : 0;
+    music.active = music.activeFor > 0.4;
+  } else {
+    // music_listener.py already waits ~2 s before saying "music" and ~2.5 s of quiet before "stopped",
+    // so a pause inside a song or the gap between two tracks doesn't end the dance.
+    music.active = live;
+    music.activeFor = live ? music.activeFor + dt : 0;
+  }
+  if (!music.active && sim.time - music.lastBeat > 4) music.period = 0;
+}
+// ================================================================ forms
+const forms = {};
+function makeForm(id, label, opts) {
+  const f = Object.assign({
+    id, label, ready: false, moodWeight: 0.15, center: [0, 0, 0], focus: [0, 0, 0], glow: 0.14,
+    palette: [[0.1, 0.2, 0.6], [0.4, 0.8, 1.0], [0.9, 1.0, 1.0]],
+    init() {}, update() {}, act() { return null; },
+  }, opts);
+  f.x = new Float32Array(N); f.y = new Float32Array(N); f.z = new Float32Array(N);
+  f.tone = new Float32Array(N); f.bright = new Float32Array(N);
+  forms[id] = f;
+  return f;
+}
+function ensure(f) { if (!f.ready) { f.init(); f.ready = true; } return f; }
+
+// ---------------------------------------------------------------- ORB (her normal form)
+makeForm('orb', 'Orb', {
+  moodWeight: 1, glow: 0.22,
+  init() {
+    this.k = new Uint8Array(N); this.A = new Float32Array(N); this.B = new Float32Array(N); this.C = new Float32Array(N);
+    const [nShell, nCore, nRing, nStream, nSat] = counts([0.44, 0.1, 0.2, 0.12, 0.04, 0.1]);
+    let i = 0;
+    for (let j = 0; j < nShell; j++, i++) { this.k[i] = 0; this.A[i] = Math.acos(1 - 2 * (j + 0.5) / nShell); this.B[i] = (j * GA) % TAU; this.C[i] = Math.random(); }
+    for (let j = 0; j < nCore; j++, i++) { this.k[i] = 1; this.A[i] = Math.acos(2 * Math.random() - 1); this.B[i] = Math.random() * TAU; this.C[i] = Math.abs(gauss()) * 0.55; }
+    for (let j = 0; j < nRing; j++, i++) { this.k[i] = 2; this.A[i] = Math.random() * TAU; this.B[i] = gauss(); this.C[i] = j % 3; }
+    for (let j = 0; j < nStream; j++, i++) { this.k[i] = 3; this.A[i] = Math.random(); this.B[i] = j % 14; this.C[i] = gauss(); }
+    for (let j = 0; j < nSat; j++, i++) { this.k[i] = 4; this.A[i] = j % 5; this.B[i] = Math.acos(2 * Math.random() - 1); this.C[i] = Math.random() * TAU; }
+    for (; i < N; i++) { this.k[i] = 5; this.A[i] = Math.acos(2 * Math.random() - 1); this.B[i] = Math.random() * TAU; this.C[i] = Math.random(); }
+    this.rings = [[0.35, 0.25], [1.2, -0.7], [-0.95, 1.05]].map(([ax, az]) => {
+      const m = rotMat(0, ax, az);
+      const n = [m[1], m[4], m[7]], u = [m[0], m[3], m[6]], v = cross(n, u);
+      return { n, u, v };
+    });
+    this.streams = Array.from({ length: 14 }, (_, j) => { const y = 1 - 2 * (j + 0.5) / 14, r = Math.sqrt(1 - y * y), p = j * GA; return [Math.cos(p) * r, y, Math.sin(p) * r]; });
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, k = this.k, A = this.A, B = this.B, C = this.C;
+    const R = 0.5 * (0.84 + 0.16 * S.awake) * (1 + 0.05 * S.level + 0.1 * S.beat);
+    const bandSpin = 1 + 4 * S.think;
+    const ripple = 0.05 * S.user + 0.07 * S.level;
+    const ringSpeed = [0.5, -0.38, 0.29];
+    const ringOpen = 0.55 + 0.45 * S.awake;
+    for (let i = 0; i < N; i++) {
+      switch (k[i]) {
+        case 0: {                                                     // shell with drifting bands
+          const th = A[i], ph = B[i] + t * (0.07 + 0.1 * Math.cos(2 * th)) * bandSpin;
+          const st = Math.sin(th), ct = Math.cos(th);
+          const band = 0.5 + 0.5 * Math.sin(th * 11 + Math.sin(ph * 2 + t * 0.4) * 0.8 - t * 0.3);
+          const r = R * (1 + 0.022 * Math.sin(5 * th + 3 * ph - t * 1.1) + 0.016 * Math.sin(8 * ph - 3 * th + t * 0.8)
+                         + ripple * Math.sin(14 * th - t * 15) + S.music * 0.25 * S.bandAt(Math.abs(ct)));
+          X[i] = st * Math.cos(ph) * r; Y[i] = ct * r; Z[i] = st * Math.sin(ph) * r;
+          TN[i] = 0.3 + 0.45 * band; BR[i] = 0.62 + 0.55 * band + (C[i] > 0.985 ? 1.6 : 0);
+          break;
+        }
+        case 1: {                                                     // bright core
+          const th = A[i], ph = B[i] + t * (0.6 + 2.2 * S.think);
+          const r = 0.1 * (1 + C[i]) * (1 + 0.9 * S.level + 0.5 * S.beat + 0.25 * S.think * Math.sin(t * 9));
+          const st = Math.sin(th);
+          X[i] = st * Math.cos(ph) * r; Y[i] = Math.cos(th) * r; Z[i] = st * Math.sin(ph) * r;
+          TN[i] = 0.97; BR[i] = 1.9;
+          break;
+        }
+        case 2: {                                                     // three tilted rings, each with a comet
+          const rg = this.rings[C[i]], sp = ringSpeed[C[i]] * (1 + 3 * S.think);
+          const ang = A[i] + t * sp;
+          const rr = R * (1.42 + C[i] * 0.17) * ringOpen + B[i] * 0.011;
+          const ca = Math.cos(ang) * rr, sa = Math.sin(ang) * rr, h = B[i] * 0.004;
+          X[i] = rg.u[0] * ca + rg.v[0] * sa + rg.n[0] * h;
+          Y[i] = rg.u[1] * ca + rg.v[1] * sa + rg.n[1] * h;
+          Z[i] = rg.u[2] * ca + rg.v[2] * sa + rg.n[2] * h;
+          const d = wrapAng(A[i] - t * sp * 1.6);
+          TN[i] = 0.78; BR[i] = 0.55 + 2.6 * Math.exp(-d * d * 7) * (0.4 + 0.6 * S.awake);
+          break;
+        }
+        case 3: {                                                     // energy streams from core to shell
+          const u = fract(A[i] + t * (0.16 + 0.5 * S.think + 0.5 * S.level));
+          const d = this.streams[B[i]], tw = u * 2.4, c = Math.cos(tw), s = Math.sin(tw);
+          const r = 0.1 + u * (R * 1.02 - 0.1);
+          X[i] = (c * d[0] + s * d[2]) * r + C[i] * 0.006; Y[i] = d[1] * r; Z[i] = (-s * d[0] + c * d[2]) * r;
+          TN[i] = 0.9; BR[i] = 1.8 * Math.sin(Math.PI * u);
+          break;
+        }
+        case 4: {                                                     // five little satellites
+          const m = A[i], orbit = 0.9 + m * 0.09, ang = t * (0.35 + m * 0.11) + m * 1.3;
+          const cx = Math.cos(ang) * orbit * R * 1.4, cz = Math.sin(ang) * orbit * R * 1.4, cy = Math.sin(ang * 0.7 + m) * 0.18;
+          const r = 0.022, st = Math.sin(B[i]);
+          X[i] = cx + st * Math.cos(C[i]) * r; Y[i] = cy + Math.cos(B[i]) * r; Z[i] = cz + st * Math.sin(C[i]) * r;
+          TN[i] = 0.92; BR[i] = 1.3 * (0.4 + 0.6 * S.awake);
+          break;
+        }
+        default: {                                                    // sparkling halo
+          const th = A[i], ph = B[i] + t * 0.03, r = R * (2.0 + C[i] * 1.4), st = Math.sin(th);
+          X[i] = st * Math.cos(ph) * r; Y[i] = Math.cos(th) * r; Z[i] = st * Math.sin(ph) * r;
+          TN[i] = 0.55; BR[i] = 0.22 + 0.25 * Math.max(0, Math.sin(t * 1.3 + C[i] * 40));
+        }
+      }
+    }
+    applyMat(this, rotMat(t * 0.11, 0.32, 0.12), 1, 0, 0, 0);
+    this.focus = [0, 0, R];
+  },
+});
+
+// ---------------------------------------------------------------- DRAGON
+makeForm('dragon', 'Dragon', {
+  palette: [[0.42, 0.04, 0.07], [1.0, 0.33, 0.09], [1.0, 0.86, 0.46]], glow: 0.1,
+  init() {
+    const M = this.M = 181;
+    this.SP = { x: new Float32Array(M), y: new Float32Array(M), z: new Float32Array(M), tx: new Float32Array(M), ty: new Float32Array(M), tz: new Float32Array(M), nx: new Float32Array(M), ny: new Float32Array(M), nz: new Float32Array(M), bx: new Float32Array(M), by: new Float32Array(M), bz: new Float32Array(M) };
+    const PROF = [[0, 0.018], [0.03, 0.036], [0.065, 0.056], [0.09, 0.05], [0.14, 0.041], [0.22, 0.047], [0.3, 0.074], [0.4, 0.116], [0.5, 0.108], [0.6, 0.076], [0.75, 0.044], [0.9, 0.019], [1.0, 0.006]];
+    const prof = s => { for (let j = 1; j < PROF.length; j++) if (s <= PROF[j][0]) { const a = PROF[j - 1], b = PROF[j], u = (s - a[0]) / (b[0] - a[0]); return lerp(a[1], b[1], u * u * (3 - 2 * u)); } return 0.006; };
+    this.prof = prof;
+    const kind = this.kind = new Uint8Array(N);   // 0 body,1 spike,2 horn,3 eye,4 tooth,5 wing,6 leg,7 spade,8 fx
+    const s_ = this.s = new Float32Array(N), oa = this.oa = new Float32Array(N), ob = this.ob = new Float32Array(N), oc = this.oc = new Float32Array(N);
+    const jaw = this.jaw = new Uint8Array(N), aux = this.aux = new Float32Array(N), aux2 = this.aux2 = new Float32Array(N);
+    const TN = this.tone, BR = this.bright;
+    const c = counts([0.33, 0.05, 0.02, 0.006, 0.014, 0.3, 0.07, 0.02, 0.19]);
+    let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) {                         // body surface
+      let s; do { s = Math.random(); } while (Math.random() * 0.12 > prof(s));
+      const th = Math.random() * TAU, r = prof(s), hs = s < 0.1 ? 0.72 : 0.86;
+      kind[i] = 0; s_[i] = s; ob[i] = r * hs * Math.sin(th); oc[i] = r * Math.cos(th);
+      jaw[i] = s < 0.085 && Math.sin(th) < -0.12 ? 1 : 0;
+      const belly = Math.sin(th) < -0.35;
+      TN[i] = belly ? 0.7 + 0.08 * Math.sin(s * 150) : s < 0.1 ? 0.42 : 0.26 + 0.12 * Math.random();
+      BR[i] = belly ? 0.85 : 0.75 + (Math.sin(th) > 0.9 ? 0.5 : 0);
+    }
+    for (let j = 0; j < c[1]; j++, i++) {                         // spikes along the back
+      const k = j % 30, s = 0.1 + k * (0.86 / 29), h = 0.018 + 0.05 * prof(s) / 0.116, L = 0.012 + 0.012 * h / 0.07;
+      let u = Math.random(), v = Math.random(); if (u + v > 1) { u = 1 - u; v = 1 - v; }
+      const pa = [L, 0], pb = [-L, 0], pc = [-L * 1.6, h];
+      kind[i] = 1; s_[i] = s;
+      oa[i] = pa[0] + u * (pb[0] - pa[0]) + v * (pc[0] - pa[0]);
+      ob[i] = prof(s) * 0.86 + u * (pb[1] - pa[1]) + v * (pc[1] - pa[1]);
+      oc[i] = (Math.random() - 0.5) * 0.004;
+      TN[i] = 0.9; BR[i] = 1.25;
+    }
+    for (let j = 0; j < c[2]; j++, i++) {                         // horns
+      const side = j % 2 ? 1 : -1, u = Math.random(), ang = Math.random() * TAU, rad = 0.012 * (1 - u);
+      kind[i] = 2; s_[i] = 0.075;
+      oa[i] = -0.005 - 0.17 * u; ob[i] = prof(0.075) * 0.6 + 0.075 * u - 0.035 * u * u + Math.cos(ang) * rad; oc[i] = side * (0.028 + 0.04 * u) + Math.sin(ang) * rad;
+      TN[i] = 0.95; BR[i] = 1.35;
+    }
+    for (let j = 0; j < c[3]; j++, i++) {                         // eyes
+      const side = j % 2 ? 1 : -1;
+      kind[i] = 3; s_[i] = 0.034; oa[i] = gauss() * 0.004; ob[i] = prof(0.034) * 0.35 + gauss() * 0.004; oc[i] = side * prof(0.034) * 0.86 + gauss() * 0.003;
+      TN[i] = 1; BR[i] = 3.4;
+    }
+    for (let j = 0; j < c[4]; j++, i++) {                         // teeth
+      const side = j % 2 ? 1 : -1, lower = (j >> 1) % 2, s = 0.006 + Math.random() * 0.055, v = Math.random();
+      kind[i] = 4; s_[i] = s; jaw[i] = lower;
+      oc[i] = side * prof(s) * 0.78; ob[i] = lower ? -prof(s) * 0.2 + 0.013 * v : -prof(s) * 0.05 - 0.013 * v;
+      TN[i] = 1; BR[i] = 1.5;
+    }
+    const WING = { S: [0, 0], W: [0.42, 0.09], F: [[1.0, 0.16], [0.9, -0.2], [0.7, -0.42], [0.44, -0.55]], T: [0.04, -0.5] };
+    const fan = [[WING.F[0], WING.F[1]], [WING.F[1], WING.F[2]], [WING.F[2], WING.F[3]], [WING.F[3], WING.T]];
+    for (let j = 0; j < c[5]; j++, i++) {                         // wings: membrane + bones
+      const side = j % 2 ? 1 : -1;
+      let u, v, bone = 0;
+      if (Math.random() < 0.22) {                                 // bones: arm + four fingers
+        bone = 1;
+        const which = Math.floor(Math.random() * 5), q = Math.random();
+        const a = which === 0 ? WING.S : WING.W, b = which === 0 ? WING.W : WING.F[which - 1];
+        u = lerp(a[0], b[0], q) + gauss() * 0.004; v = lerp(a[1], b[1], q) + gauss() * 0.004;
+      } else if (Math.random() < 0.3) {                           // inner membrane S-W-T
+        let p = Math.random(), q = Math.random(); if (p + q > 1) { p = 1 - p; q = 1 - q; }
+        u = WING.S[0] + p * (WING.W[0] - WING.S[0]) + q * (WING.T[0] - WING.S[0]);
+        v = WING.S[1] + p * (WING.W[1] - WING.S[1]) + q * (WING.T[1] - WING.S[1]);
+      } else {                                                    // fan membranes with scalloped edges
+        const tri = fan[Math.floor(Math.random() * 4)];
+        let w0, w1, w2;
+        do {
+          w1 = Math.random(); w2 = Math.random(); if (w1 + w2 > 1) { w1 = 1 - w1; w2 = 1 - w2; } w0 = 1 - w1 - w2;
+        } while (w0 < 0.2 * Math.sin(Math.PI * w2 / (w1 + w2 + 1e-6)));
+        u = WING.W[0] * w0 + tri[0][0] * w1 + tri[1][0] * w2; v = WING.W[1] * w0 + tri[0][1] * w1 + tri[1][1] * w2;
+      }
+      kind[i] = 5; aux[i] = side; oa[i] = u; ob[i] = v; jaw[i] = bone;
+      TN[i] = bone ? 0.6 : 0.2 + 0.18 * Math.random(); BR[i] = bone ? 1.2 : 0.82;
+    }
+    for (let j = 0; j < c[6]; j++, i++) {                         // legs: thigh, shin, three claws
+      const leg = j % 4, seg = Math.random() < 0.42 ? 0 : Math.random() < 0.72 ? 1 : 2;
+      kind[i] = 6; aux[i] = leg; aux2[i] = seg; oa[i] = Math.random(); ob[i] = Math.random() * TAU; oc[i] = Math.floor(Math.random() * 3);
+      TN[i] = seg === 2 ? 0.96 : 0.35; BR[i] = seg === 2 ? 1.5 : 0.8;
+    }
+    for (let j = 0; j < c[7]; j++, i++) {                         // tail spade
+      const a = Math.random() * 0.13, w = 0.075 * Math.min(1, a / 0.03) * (1 - a / 0.13 * 0.85);
+      kind[i] = 7; s_[i] = 1; oa[i] = -a; oc[i] = (Math.random() * 2 - 1) * w; ob[i] = 0;
+      TN[i] = 0.88; BR[i] = 1.1;
+    }
+    for (; i < N; i++) {                                          // fire breath / embers
+      kind[i] = 8; aux[i] = Math.random(); aux2[i] = Math.random(); s_[i] = Math.random() * 0.9; oa[i] = gauss(); ob[i] = gauss(); oc[i] = Math.random() * TAU;
+      TN[i] = 0.85; BR[i] = 0.3;
+    }
+    this.baseTone = TN.slice(); this.baseBright = BR.slice();
+    this.roarT = 99; this.fireT = 99; this.fly = 0; this.flyTarget = 0; this.flyPhase = 0;
+  },
+  act(name) {
+    if (name === 'roar') { this.roarT = 0; return 'roar'; }
+    if (name === 'fire') { this.fireT = 0; return 'fire'; }
+    if (name === 'fly') { this.flyTarget = 1; return 'fly'; }
+    if (name === 'stay') { this.flyTarget = 0; return 'stay'; }
+    return null;
+  },
+  update(t, dt, S) {
+    const M = this.M, SP = this.SP, prof = this.prof;
+    this.roarT += dt; this.fireT += dt;
+    const env = (tt, a, h, r) => tt < 0 ? 0 : tt < a ? tt / a : tt < a + h ? 1 : tt < a + h + r ? 1 - (tt - a - h) / r : 0;
+    const roar = smooth(0, 1, env(this.roarT, 0.3, 1.2, 0.6)), fire = smooth(0, 1, env(this.fireT, 0.3, 2.3, 0.5));
+    this.fly = approach(this.fly, this.flyTarget, 1.2, dt);
+    const w = TAU / 1.25, beat = S.beat;
+    // --- spine
+    for (let j = 0; j < M; j++) {
+      const s = j / (M - 1);
+      let x = 0.95 - 2.05 * s;
+      let y = 0.17 * (1 - smooth(0.1, 0.34, s)) - 0.1 * smooth(0.62, 1, s)
+            + 0.035 * Math.sin(w * 0.55 * t - s * 8) * smooth(0.2, 0.6, s) + 0.03 * Math.sin(w * t + Math.PI) * 0.6
+            + roar * 0.17 * (1 - smooth(0.05, 0.32, s)) - fire * 0.06 * (1 - smooth(0, 0.26, s));
+      let z = 0.075 * Math.sin(0.9 * t - s * 6) * Math.pow(s, 1.5) * (1 - 0.6 * roar) + roar * 0.01 * Math.sin(t * 40) * (1 - s);
+      x -= roar * 0.05 * (1 - smooth(0, 0.3, s));
+      SP.x[j] = x; SP.y[j] = y; SP.z[j] = z;
+    }
+    for (let j = 0; j < M; j++) {
+      const a = Math.max(0, j - 1), b = Math.min(M - 1, j + 1);
+      const T = norm3([SP.x[a] - SP.x[b], SP.y[a] - SP.y[b], SP.z[a] - SP.z[b]]);
+      const Bv = norm3(cross(T, [0, 1, 0])), Nv = cross(Bv, T);
+      SP.tx[j] = T[0]; SP.ty[j] = T[1]; SP.tz[j] = T[2]; SP.nx[j] = Nv[0]; SP.ny[j] = Nv[1]; SP.nz[j] = Nv[2]; SP.bx[j] = Bv[0]; SP.by[j] = Bv[1]; SP.bz[j] = Bv[2];
+    }
+    const frame = s => {
+      const f = clamp(s, 0, 1) * (M - 1), j = Math.min(M - 2, Math.floor(f)), u = f - j;
+      const L = (arr) => arr[j] + (arr[j + 1] - arr[j]) * u;
+      return { p: [L(SP.x), L(SP.y), L(SP.z)], T: [L(SP.tx), L(SP.ty), L(SP.tz)], N: [L(SP.nx), L(SP.ny), L(SP.nz)], B: [L(SP.bx), L(SP.by), L(SP.bz)] };
+    };
+    // jaw hinge
+    const jawOpen = Math.max(roar * 0.62, fire * 0.42);
+    const h = frame(0.085), pivot = [h.p[0] - h.N[0] * 0.01, h.p[1] - h.N[1] * 0.01, h.p[2] - h.N[2] * 0.01];
+    const ax = h.B, ca = Math.cos(-jawOpen), sa = Math.sin(-jawOpen);
+    const rotJaw = (x, y, z) => {                                   // Rodrigues around the jaw hinge
+      const vx = x - pivot[0], vy = y - pivot[1], vz = z - pivot[2];
+      const d = ax[0] * vx + ax[1] * vy + ax[2] * vz, cx = ax[1] * vz - ax[2] * vy, cy = ax[2] * vx - ax[0] * vz, cz = ax[0] * vy - ax[1] * vx;
+      return [pivot[0] + vx * ca + cx * sa + ax[0] * d * (1 - ca), pivot[1] + vy * ca + cy * sa + ax[1] * d * (1 - ca), pivot[2] + vz * ca + cz * sa + ax[2] * d * (1 - ca)];
+    };
+    // wings
+    const flapAmp = lerp(0.72, 0.1, roar) * (1 - 0.3 * fire);
+    const phi = lerp(0.22 + flapAmp * Math.sin(w * t), 1.05 + 0.04 * Math.sin(t * 28), roar);
+    const phi2 = -0.5 * Math.sin(w * t - 1.1) * (1 - roar);
+    const wr = frame(0.34), wroot = [wr.p[0] + wr.N[0] * prof(0.34) * 0.72, wr.p[1] + wr.N[1] * prof(0.34) * 0.72, wr.p[2] + wr.N[2] * prof(0.34) * 0.72];
+    const WL = 0.92, UW = 0.42;
+    // legs
+    const legS = [0.31, 0.31, 0.56, 0.56], legSide = [1, -1, 1, -1];
+    const legs = legS.map((s, L) => {
+      const f = frame(s), r = prof(s), sd = legSide[L], front = L < 2;
+      const hip = [0, 1, 2].map(k => f.p[k] - f.N[k] * r * 0.5 + f.B[k] * sd * r * 0.7);
+      const sw = 0.15 * Math.sin(t * 1.3 + L);
+      const reach = front ? roar : 0;
+      const thigh = norm3([0, 1, 2].map(k => lerp(-f.T[k] * (0.5 + sw) - f.N[k] * 0.85 + f.B[k] * sd * 0.12, f.T[k] * 0.6 - f.N[k] * 0.6, reach)));
+      const knee = [0, 1, 2].map(k => hip[k] + thigh[k] * 0.12);
+      const shin = norm3([0, 1, 2].map(k => lerp(-f.T[k] * 0.95 - f.N[k] * 0.22, f.T[k] * 0.8 - f.N[k] * 0.2, reach)));
+      const ankle = [0, 1, 2].map(k => knee[k] + shin[k] * 0.1);
+      const segs = [[hip, thigh, 0.12, 0.03, 0.02], [knee, shin, 0.1, 0.02, 0.014]];
+      for (let c = 0; c < 3; c++) segs.push([ankle, norm3([0, 1, 2].map(k => shin[k] * 0.5 + f.B[k] * sd * 0.3 * (c - 1) - f.N[k] * 0.45)), 0.04, 0.006, 0]);
+      return segs.map(([a, dir, len, r0, r1]) => { const p1 = norm3(cross(dir, f.B)); return { a, dir, len, r0, r1, p1, p2: cross(dir, p1) }; });
+    });
+    // fire
+    const mf = frame(0.0), mouth = [mf.p[0] + mf.T[0] * 0.03 - mf.N[0] * 0.012, mf.p[1] + mf.T[1] * 0.03 - mf.N[1] * 0.012, mf.p[2] + mf.T[2] * 0.03 - mf.N[2] * 0.012];
+    const fdir = norm3([mf.T[0] - mf.N[0] * 0.3, mf.T[1] - mf.N[1] * 0.3, mf.T[2] - mf.N[2] * 0.3]);
+    const fp1 = norm3(cross(fdir, [0, 1, 0])), fp2 = cross(fp1, fdir);
+
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, kind = this.kind;
+    const s_ = this.s, oa = this.oa, ob = this.ob, oc = this.oc, jaw = this.jaw, aux = this.aux, aux2 = this.aux2;
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k <= 4 || k === 7) {
+        const f = clamp(s_[i], 0, 1) * (M - 1), j = Math.min(M - 2, f | 0), u = f - j, u1 = 1 - u;
+        const px = SP.x[j] * u1 + SP.x[j + 1] * u, py = SP.y[j] * u1 + SP.y[j + 1] * u, pz = SP.z[j] * u1 + SP.z[j + 1] * u;
+        const tx = SP.tx[j], ty = SP.ty[j], tz = SP.tz[j], nx = SP.nx[j], ny = SP.ny[j], nz = SP.nz[j], bx = SP.bx[j], by = SP.by[j], bz = SP.bz[j];
+        let x = px + tx * oa[i] + nx * ob[i] + bx * oc[i], y = py + ty * oa[i] + ny * ob[i] + by * oc[i], z = pz + tz * oa[i] + nz * ob[i] + bz * oc[i];
+        if (jaw[i] && jawOpen > 0.001) { const r = rotJaw(x, y, z); x = r[0]; y = r[1]; z = r[2]; }
+        X[i] = x; Y[i] = y; Z[i] = z;
+        BR[i] = this.baseBright[i] * (k === 3 ? 1 + roar : 1) * (k === 4 ? 0.4 + jawOpen * 1.6 : 1);
+      } else if (k === 5) {
+        const side = aux[i], u = oa[i], v = ob[i], ph = phi, p2 = phi + phi2;
+        const o1x = wr.B[0] * side * Math.cos(ph) + wr.N[0] * Math.sin(ph), o1y = wr.B[1] * side * Math.cos(ph) + wr.N[1] * Math.sin(ph), o1z = wr.B[2] * side * Math.cos(ph) + wr.N[2] * Math.sin(ph);
+        const inner = Math.min(u, UW), outer = Math.max(0, u - UW);
+        const o2x = wr.B[0] * side * Math.cos(p2) + wr.N[0] * Math.sin(p2), o2y = wr.B[1] * side * Math.cos(p2) + wr.N[1] * Math.sin(p2), o2z = wr.B[2] * side * Math.cos(p2) + wr.N[2] * Math.sin(p2);
+        X[i] = wroot[0] + (wr.T[0] * v + o1x * inner + o2x * outer) * WL;
+        Y[i] = wroot[1] + (wr.T[1] * v + o1y * inner + o2y * outer) * WL;
+        Z[i] = wroot[2] + (wr.T[2] * v + o1z * inner + o2z * outer) * WL;
+        BR[i] = this.baseBright[i] * (1 + 0.35 * roar);
+      } else if (k === 6) {
+        const sg = legs[aux[i]][aux2[i] < 2 ? aux2[i] : 2 + oc[i]], u = oa[i], ang = ob[i];
+        const rad = lerp(sg.r0, sg.r1, u), ca2 = Math.cos(ang) * rad, sa2 = Math.sin(ang) * rad, a = sg.a, dir = sg.dir, len = sg.len, p1 = sg.p1, p2 = sg.p2;
+        X[i] = a[0] + dir[0] * len * u + p1[0] * ca2 + p2[0] * sa2;
+        Y[i] = a[1] + dir[1] * len * u + p1[1] * ca2 + p2[1] * sa2;
+        Z[i] = a[2] + dir[2] * len * u + p1[2] * ca2 + p2[2] * sa2;
+      } else {                                                     // fire (k === 8)
+        const age = fract(t * 1.35 + aux[i]);
+        const spread = 0.015 + age * 0.26, dist = age * 1.15;
+        const fx = mouth[0] + fdir[0] * dist + (fp1[0] * oa[i] + fp2[0] * ob[i]) * spread;
+        const fy = mouth[1] + fdir[1] * dist + (fp1[1] * oa[i] + fp2[1] * ob[i]) * spread + age * age * 0.12;
+        const fz = mouth[2] + fdir[2] * dist + (fp1[2] * oa[i] + fp2[2] * ob[i]) * spread;
+        const ej = (s_[i] * (M - 1)) | 0, er = 0.18 + aux2[i] * 0.35, ea = oc[i] + t * 0.35, ec = Math.cos(ea) * er, es = Math.sin(ea) * er;
+        const ex = SP.x[ej] + SP.nx[ej] * ec + SP.bx[ej] * es;
+        const ey = SP.y[ej] + SP.ny[ej] * ec + SP.by[ej] * es + fract(t * 0.07 + aux2[i]) * 0.25;
+        const ez = SP.z[ej] + SP.nz[ej] * ec + SP.bz[ej] * es;
+        const fa = clamp(fire * 1.4 - aux2[i] * 0.4, 0, 1);
+        X[i] = lerp(ex, fx, fa); Y[i] = lerp(ey, fy, fa); Z[i] = lerp(ez, fz, fa);
+        TN[i] = lerp(0.82, 1 - age * 0.55, fa);
+        BR[i] = lerp(0.28 + 0.2 * Math.sin(t * 3 + oc[i] * 9), 2.8 * Math.pow(1 - age, 0.7), fa);
+      }
+    }
+    // flight: hover facing you three-quarters, or fly a banking circle around the window
+    this.flyPhase += dt * 0.55 * this.fly;
+    const a = this.flyPhase, fx = Math.cos(a) * 0.52, fz = Math.sin(a) * 0.38, fy = Math.sin(2 * a) * 0.1;
+    const vx = -Math.sin(a) * 0.52, vz = Math.cos(a) * 0.38;
+    const flyYaw = Math.atan2(-vz, vx);
+    const hoverYaw = -2.25 + 0.28 * Math.sin(t * 0.33);
+    let dy = flyYaw - hoverYaw; dy = wrapAng(dy);
+    const yaw = hoverYaw + dy * this.fly;
+    const sc = lerp(0.98, 0.66, this.fly) * (1 + 0.05 * beat);
+    const m = rotMat(yaw, 0.12 - roar * 0.15, -0.38 * this.fly);
+    const tr = [fx * this.fly, fy * this.fly - 0.08 + 0.02 * Math.sin(w * t), fz * this.fly];
+    applyMat(this, m, sc, tr[0], tr[1], tr[2]);
+    this.focus = xf(m, sc, tr, mouth);
+    this.center = tr;
+    if (roar > 0.5 && sim.time - (this.lastRoarRing || -9) > 0.32) { this.lastRoarRing = sim.time; addRing(this.focus, 0.9); }
+    this.glowBoost = 0.25 * fire + 0.15 * roar;
+  },
+});
+
+// ---------------------------------------------------------------- SWORD
+makeForm('sword', 'Sword', {
+  palette: [[1.0, 0.72, 0.28], [0.72, 0.84, 1.0], [0.35, 0.95, 1.0]], glow: 0.12,
+  init() {
+    const kind = this.kind = new Uint8Array(N), P = this.P = new Float32Array(N * 3), A = this.A = new Float32Array(N);
+    const TN = this.tone, BR = this.bright;
+    const c = counts([0.36, 0.1, 0.035, 0.035, 0.1, 0.02, 0.08, 0.04, 0.23]);
+    const wAt = y => 0.07 * (1 - smooth(0.85, 1.25, y)) + 0.002;
+    const glyphs = Array.from({ length: 11 }, () => Array.from({ length: 15 }, () => Math.random() < 0.45));
+    let i = 0;
+    const put = (k, x, y, z, tone, br, a = 0) => { kind[i] = k; P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = z; TN[i] = tone; BR[i] = br; A[i] = a; i++; };
+    for (let j = 0; j < c[0]; j++) {                              // blade faces (diamond cross-section)
+      const y = Math.random() * 1.25, w = wAt(y), x = (Math.random() * 2 - 1) * w, side = Math.random() < 0.5 ? -1 : 1;
+      put(0, x, y, side * 0.013 * (1 - Math.abs(x) / w), 0.52 + 0.1 * Math.random(), 0.75 + 0.3 * (Math.abs(x) / w));
+    }
+    for (let j = 0; j < c[1]; j++) { const y = Math.random() * 1.25, side = j % 2 ? 1 : -1; put(1, side * wAt(y), y, 0, 0.82, 1.55); }   // edges
+    for (let j = 0; j < c[2]; j++) { const y = 0.02 + Math.random() * 0.9, side = Math.random() < 0.5 ? -1 : 1; put(2, (Math.random() * 2 - 1) * 0.007, y, side * 0.006, 1, 1.1); }  // fuller
+    for (let j = 0; j < c[3]; j++) {                              // runes
+      let g, cx, cy, tries = 0;
+      do { g = Math.floor(Math.random() * 11); cx = Math.floor(Math.random() * 3); cy = Math.floor(Math.random() * 5); tries++; } while (!glyphs[g][cy * 3 + cx] && tries < 20);
+      const y = 0.1 + g * 0.075 + (cy / 5) * 0.05 + Math.random() * 0.009, x = (cx - 1) * 0.011 + (Math.random() - 0.5) * 0.008, side = Math.random() < 0.5 ? -1 : 1;
+      put(3, x, y, side * 0.0135, 1, 2.2);
+    }
+    for (let j = 0; j < c[4]; j++) {                              // crossguard
+      const x = (Math.random() * 2 - 1) * 0.3, cy = -0.02 + 0.055 * Math.pow(Math.abs(x) / 0.3, 2.5), r = 0.021 * (1 - 0.35 * Math.abs(x) / 0.3), a = Math.random() * TAU;
+      put(4, x, cy + Math.cos(a) * r, Math.sin(a) * r, 0.05 + 0.08 * Math.random(), 1.0);
+    }
+    for (let j = 0; j < c[5]; j++) {                              // gem + guard end caps
+      const which = j % 3, a = Math.acos(2 * Math.random() - 1), b = Math.random() * TAU, r = which === 0 ? 0.033 : 0.026;
+      const cx = which === 0 ? 0 : which === 1 ? 0.31 : -0.31, cy = which === 0 ? -0.005 : 0.035;
+      put(5, cx + Math.sin(a) * Math.cos(b) * r, cy + Math.cos(a) * r, (which === 0 ? 0.018 : 0) + Math.sin(a) * Math.sin(b) * r, which === 0 ? 1 : 0.1, which === 0 ? 2.6 : 1.2);
+    }
+    for (let j = 0; j < c[6]; j++) {                              // wrapped grip
+      const y = -0.3 + Math.random() * 0.28, a = Math.random() * TAU, wrap = fract(y * 16 + a / TAU) < 0.5;
+      put(6, Math.cos(a) * 0.022, y, Math.sin(a) * 0.022, wrap ? 0.12 : 0.3, wrap ? 0.95 : 0.6);
+    }
+    for (let j = 0; j < c[7]; j++) {                              // pommel
+      const a = Math.acos(2 * Math.random() - 1), b = Math.random() * TAU, r = 0.043;
+      put(7, Math.sin(a) * Math.cos(b) * r, -0.345 + Math.cos(a) * r, Math.sin(a) * Math.sin(b) * r, 0.06, 1.15);
+    }
+    for (; i < N;) put(8, Math.random(), Math.random() * TAU, 0.08 + Math.random() * 0.07, 0.95, 0.4, Math.random());   // aura wisps
+    this.baseBright = BR.slice();
+    this.swingT = 99;
+  },
+  act(name) { if (name === 'swing') { this.swingT = 0; return 'swing'; } return null; },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, kind = this.kind, P = this.P, A = this.A;
+    this.swingT += dt;
+    const st = this.swingT;
+    let swingZ = 0, swingGlow = 0;
+    if (st < 1.3) {
+      if (st < 0.3) swingZ = smooth(0, 0.3, st) * 0.9;
+      else if (st < 0.52) swingZ = lerp(0.9, -2.3, smooth(0.3, 0.52, st));
+      else swingZ = lerp(-2.3, 0, smooth(0.75, 1.3, st));
+      swingGlow = st < 0.9 ? 1 : 1 - smooth(0.9, 1.3, st);
+    }
+    const wave = fract(t * 0.45) * 1.7 - 0.25;
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k === 8) {
+        const u = fract(P[i * 3] + t * 0.12), y = u * 1.55 - 0.25, ang = P[i * 3 + 1] + y * 6 + t * 2.2, r = P[i * 3 + 2] * (0.6 + 0.4 * Math.sin(y * 3 + t)) * (0.4 + 0.6 * (1 - smooth(0.9, 1.3, y)));
+        X[i] = Math.cos(ang) * r; Y[i] = y; Z[i] = Math.sin(ang) * r;
+        TN[i] = 0.95; BR[i] = (0.35 + 0.7 * S.level + 0.6 * swingGlow) * Math.sin(Math.PI * u);
+        continue;
+      }
+      const y = P[i * 3 + 1];
+      X[i] = P[i * 3]; Y[i] = y; Z[i] = P[i * 3 + 2];
+      let br = this.baseBright[i];
+      if (k <= 3) br *= 1 + 1.8 * Math.exp(-(y - wave) * (y - wave) * 70) + 0.8 * swingGlow + 0.6 * S.level;
+      BR[i] = br;
+    }
+    const m = rotMat(t * 0.6 * (1 - Math.min(1, swingGlow)) + 0.4, 0.1, 0.18 + swingZ);
+    const bob = 0.03 * Math.sin(t * 1.4);
+    applyMat(this, m, 1.05, 0, -0.42 + bob, 0);
+    this.focus = xf(m, 1.05, [0, -0.42 + bob, 0], [0, 1.2, 0]);
+    this.center = [0, 0.05, 0];
+    if (st > 0.3 && st < 0.36 && !this.ringDone) { this.ringDone = true; addRing(this.focus, 0.9); }
+    if (st > 1) this.ringDone = false;
+  },
+});
+
+// ---------------------------------------------------------------- KNIGHT (an original game-style figure)
+makeForm('knight', 'Knight', {
+  palette: [[0.14, 0.22, 0.75], [0.78, 0.84, 0.95], [1.0, 0.78, 0.32]], glow: 0.1,
+  init() {
+    const kind = this.kind = new Uint8Array(N), P = this.P = new Float32Array(N * 3), Q = this.Q = new Float32Array(N * 3);
+    const TN = this.tone, BR = this.bright;
+    // 0 static body (torso, helmet, pauldrons, belt, legs), 1 right upper arm, 2 right forearm, 3 sword, 4 left upper arm,
+    // 5 left forearm, 6 shield, 7 cape, 8 plume, 9 visor eyes
+    const c = counts([0.34, 0.03, 0.03, 0.11, 0.03, 0.03, 0.12, 0.12, 0.05, 0.006, 0.144]);
+    let i = 0;
+    const put = (k, x, y, z, tone, br, q = [0, 0, 0]) => { kind[i] = k; P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = z; Q[i * 3] = q[0]; Q[i * 3 + 1] = q[1]; Q[i * 3 + 2] = q[2]; TN[i] = tone; BR[i] = br; i++; };
+    const ell = (cx, cy, cz, rx, ry, rz) => { const a = Math.acos(2 * Math.random() - 1), b = Math.random() * TAU; return [cx + Math.sin(a) * Math.cos(b) * rx, cy + Math.cos(a) * ry, cz + Math.sin(a) * Math.sin(b) * rz]; };
+    const capsule = (a, b, r0, r1) => { const u = Math.random(), ang = Math.random() * TAU, d = norm3([b[0] - a[0], b[1] - a[1], b[2] - a[2]]); const p1 = norm3(cross(d, Math.abs(d[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0])), p2 = cross(d, p1), r = lerp(r0, r1, u); return [0, 1, 2].map(k => lerp(a[k], b[k], u) + (p1[k] * Math.cos(ang) + p2[k] * Math.sin(ang)) * r); };
+    for (let j = 0; j < c[0]; j++) {
+      const q = Math.random();
+      let p, tone = 0.5 + 0.08 * Math.random(), br = 0.8;
+      if (q < 0.26) { p = ell(0, 0.27, 0, 0.19, 0.24, 0.12); if (p[2] > 0.08 && Math.abs(p[0]) < 0.05 + (0.36 - p[1]) * 0.3 && p[1] > 0.22 && p[1] < 0.42) { tone = 0.95; br = 1.4; } }   // breastplate + emblem
+      else if (q < 0.42) { p = ell(0, 0.655, 0, 0.12, 0.14, 0.13); if (Math.abs(p[1] - 0.655) < 0.012 && p[2] > 0.04) { j--; continue; } tone = 0.55; br = 0.95; }   // helmet (visor slit left dark)
+      else if (q < 0.52) { const s = q < 0.47 ? 1 : -1; p = ell(s * 0.25, 0.45, 0, 0.1, 0.075, 0.1); if (p[1] < 0.43) p[1] = 0.43 + (0.43 - p[1]) * 0.2; tone = 0.9; br = 1.05; }  // pauldrons
+      else if (q < 0.58) { const a = Math.random() * TAU; p = [Math.cos(a) * 0.175, 0.03 + (Math.random() - 0.5) * 0.03, Math.sin(a) * 0.12]; tone = 0.92; br = 1.1; }    // belt
+      else if (q < 0.7) { const a = Math.random() * TAU, u = Math.random(); p = [Math.cos(a) * lerp(0.18, 0.22, u), 0.02 - u * 0.2, Math.sin(a) * lerp(0.12, 0.15, u)]; tone = 0.45; br = 0.75; }   // tassets
+      else { const s = Math.random() < 0.5 ? 1 : -1, low = Math.random() < 0.5;       // legs + boots
+        p = low ? capsule([s * 0.1, -0.5, 0.02], [s * 0.11, -0.88, 0.0], 0.062, 0.05) : capsule([s * 0.1, -0.12, 0], [s * 0.1, -0.5, 0.02], 0.075, 0.062);
+        if (low && p[1] < -0.8) { p[2] += 0.03; tone = 0.3; } }
+      put(0, p[0], p[1], p[2], tone, br * 1.3);
+    }
+    // arms are stored in their own local frames: x = along the bone (0..1), y/z = offsets
+    for (let j = 0; j < c[1]; j++) put(1, Math.random(), 0, 0, 0.5, 0.85, [Math.random() * TAU, lerp(0.055, 0.045, Math.random()), 0]);
+    for (let j = 0; j < c[2]; j++) put(2, Math.random(), 0, 0, 0.52, 0.85, [Math.random() * TAU, lerp(0.045, 0.04, Math.random()), 0]);
+    for (let j = 0; j < c[3]; j++) {                              // sword: grip, guard, blade
+      const q = Math.random();
+      if (q < 0.1) put(3, -Math.random() * 0.12, 0, 0, 0.1, 1.0, [Math.random() * TAU, 0.016, 0]);
+      else if (q < 0.2) put(3, 0.0, (Math.random() * 2 - 1) * 0.12, 0, 0.08, 1.2, [Math.random() * TAU, 0.012, 1]);
+      else { const u = Math.random() * 0.78, w = 0.03 * (1 - smooth(0.6, 0.78, u)) + 0.002; put(3, u, (Math.random() * 2 - 1) * w, 0, Math.random() < 0.15 ? 1 : 0.62, Math.random() < 0.15 ? 1.8 : 1.1, [0, 0, 2]); }
+    }
+    for (let j = 0; j < c[4]; j++) put(4, Math.random(), 0, 0, 0.5, 0.85, [Math.random() * TAU, lerp(0.055, 0.045, Math.random()), 0]);
+    for (let j = 0; j < c[5]; j++) put(5, Math.random(), 0, 0, 0.52, 0.85, [Math.random() * TAU, lerp(0.045, 0.04, Math.random()), 0]);
+    for (let j = 0; j < c[6]; j++) {                              // round shield: rim, boss, cross emblem, face
+      const q = Math.random(); let r, a = Math.random() * TAU, tone = 0.12, br = 0.7;
+      if (q < 0.22) { r = 0.2 + Math.random() * 0.018; tone = 0.95; br = 1.4; }
+      else if (q < 0.3) { r = Math.random() * 0.035; tone = 1; br = 1.8; }
+      else if (q < 0.5) { const v = (Math.random() * 2 - 1) * 0.19, hor = Math.random() < 0.5; const x = hor ? v : (Math.random() - 0.5) * 0.03, y = hor ? (Math.random() - 0.5) * 0.03 : v; r = Math.hypot(x, y); a = Math.atan2(y, x); tone = 0.92; br = 1.3; }
+      else { r = Math.sqrt(Math.random()) * 0.2; }
+      put(6, Math.cos(a) * r, Math.sin(a) * r, 0.01 * (1 - r / 0.22), tone, br);
+    }
+    for (let j = 0; j < c[7]; j++) { const u = Math.random(), v = Math.random(); put(7, u, v, 0, 0.04 + 0.06 * Math.random(), 0.55 + (v > 0.96 ? 0.6 : 0)); }  // cape
+    for (let j = 0; j < c[8]; j++) put(8, Math.random(), gauss(), gauss(), 0.08, 1.1);   // plume
+    for (let j = 0; j < c[9]; j++) put(9, j % 2 ? 1 : -1, gauss() * 0.004, gauss() * 0.003, 1, 3.2);   // eyes in the visor
+    for (; i < N;) { const a = Math.random() * TAU, r = 0.35 + Math.random() * 0.9; put(10, Math.cos(a) * r, -0.95 + Math.random() * 1.9, Math.sin(a) * r, 0.9, 0.25); }  // floating motes
+    this.actT = 99; this.pose = 'idle';
+  },
+  act(name) {
+    if (name === 'attack' || name === 'swing') { this.pose = 'attack'; this.actT = 0; return 'attack'; }
+    if (name === 'block') { this.pose = 'block'; this.actT = 0; return 'block'; }
+    if (name === 'raise') { this.pose = 'raise'; this.actT = 0; return 'raise'; }
+    return null;
+  },
+  update(t, dt, S) {
+    this.actT += dt;
+    const at = this.actT;
+    // right arm keyframes: [upper dir, forearm dir, sword dir]
+    const R_IDLE = [[0.22, -0.95, 0.15], [0.05, -0.55, 0.83], [0.12, -0.5, 0.86]];
+    const R_RAISE = [[0.15, 0.98, 0.12], [0.05, 1, 0.05], [0.0, 1, 0.08]];
+    const R_WIND = [[0.62, 0.7, -0.3], [0.25, 0.88, -0.4], [-0.25, 0.55, -0.8]];
+    const R_SLASH = [[-0.2, -0.3, 0.93], [-0.45, -0.5, 0.74], [-0.75, -0.55, 0.35]];
+    const L_IDLE = [[-0.25, -0.9, 0.3], [-0.08, -0.2, 0.97]], L_BLOCK = [[-0.12, -0.35, 0.93], [0.45, 0.25, 0.86]];
+    const mixK = (a, b, u) => a.map((v, j) => norm3(mix3(v, b[j], u)));
+    let R = R_IDLE, L = L_IDLE;
+    if (this.pose === 'attack' && at < 1.5) {
+      if (at < 0.35) R = mixK(R_IDLE, R_WIND, smooth(0, 0.35, at));
+      else if (at < 0.58) R = mixK(R_WIND, R_SLASH, smooth(0.35, 0.58, at));
+      else R = mixK(R_SLASH, R_IDLE, smooth(0.8, 1.5, at));
+      if (at > 0.4 && at < 0.46 && !this.ringDone) { this.ringDone = true; this.pendingRing = true; }
+    } else if (this.pose === 'raise' && at < 3) {
+      R = mixK(R_IDLE, R_RAISE, smooth(0, 0.5, at) * (1 - smooth(2.3, 3, at)));
+    } else if (this.pose === 'block' && at < 2.2) {
+      L = mixK(L_IDLE, L_BLOCK, smooth(0, 0.3, at) * (1 - smooth(1.6, 2.2, at)));
+    } else { this.ringDone = false; }
+    const breathe = 0.008 * Math.sin(t * 1.7);
+    const shR = [0.27, 0.45 + breathe, 0], shL = [-0.27, 0.45 + breathe, 0];
+    const elR = shR.map((v, k) => v + R[0][k] * 0.24), haR = elR.map((v, k) => v + R[1][k] * 0.22);
+    const elL = shL.map((v, k) => v + L[0][k] * 0.24), haL = elL.map((v, k) => v + L[1][k] * 0.2);
+    const sw = R[2];
+    const shieldC = [haL[0] - 0.04 + L[1][0] * -0.08, haL[1] + 0.02, haL[2] + 0.06];
+    const shN = norm3(mix3([-0.35, 0.05, 1], L[1], 0.35)), shE1 = norm3(cross([0, 1, 0], shN)), shE2 = cross(shN, shE1);
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, kind = this.kind, P = this.P, Q = this.Q;
+    const segFrame = (a, b) => { const d = norm3([b[0] - a[0], b[1] - a[1], b[2] - a[2]]), p1 = norm3(cross(d, Math.abs(d[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0])); return { a, b, p1, p2: cross(d, p1) }; };
+    const SEGS = { 1: segFrame(shR, elR), 2: segFrame(elR, haR), 4: segFrame(shL, elL), 5: segFrame(elL, haL) };
+    const seg = (sf, i) => {
+      const u = P[i * 3], ang = Q[i * 3], r = Q[i * 3 + 1], a = sf.a, b = sf.b, c = Math.cos(ang) * r, s = Math.sin(ang) * r;
+      X[i] = a[0] + (b[0] - a[0]) * u + sf.p1[0] * c + sf.p2[0] * s;
+      Y[i] = a[1] + (b[1] - a[1]) * u + sf.p1[1] * c + sf.p2[1] * s;
+      Z[i] = a[2] + (b[2] - a[2]) * u + sf.p1[2] * c + sf.p2[2] * s;
+    };
+    const swP1 = norm3(cross(sw, [0, 0, 1])), swP2 = cross(sw, swP1);
+    const glowSword = this.pose === 'attack' && at < 1 ? 1.6 : 1;
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k === 0) { X[i] = P[i * 3]; Y[i] = P[i * 3 + 1] + (P[i * 3 + 1] > 0 ? breathe : 0); Z[i] = P[i * 3 + 2]; }
+      else if (k === 1 || k === 2 || k === 4 || k === 5) seg(SEGS[k], i);
+      else if (k === 3) {
+        const u = P[i * 3], v = P[i * 3 + 1], part = Q[i * 3 + 2];
+        let x, y, z;
+        if (part === 0) { const ang = Q[i * 3], r = Q[i * 3 + 1]; x = haR[0] + sw[0] * u + (swP1[0] * Math.cos(ang) + swP2[0] * Math.sin(ang)) * r; y = haR[1] + sw[1] * u + (swP1[1] * Math.cos(ang) + swP2[1] * Math.sin(ang)) * r; z = haR[2] + sw[2] * u + (swP1[2] * Math.cos(ang) + swP2[2] * Math.sin(ang)) * r; }
+        else { x = haR[0] + sw[0] * u + swP1[0] * v; y = haR[1] + sw[1] * u + swP1[1] * v; z = haR[2] + sw[2] * u + swP1[2] * v; }
+        X[i] = x; Y[i] = y; Z[i] = z;
+        BR[i] = (part === 2 ? 1.2 : 1.05) * glowSword * (1 + 0.5 * S.level);
+      } else if (k === 6) {
+        const px = P[i * 3], py = P[i * 3 + 1], pz = P[i * 3 + 2];
+        X[i] = shieldC[0] + shE1[0] * px + shE2[0] * py + shN[0] * pz; Y[i] = shieldC[1] + shE1[1] * px + shE2[1] * py + shN[1] * pz; Z[i] = shieldC[2] + shE1[2] * px + shE2[2] * py + shN[2] * pz;
+      } else if (k === 7) {                                        // cape ripples in the wind
+        const u = P[i * 3], v = P[i * 3 + 1], y = 0.47 - v * 1.05, width = lerp(0.2, 0.34, v);
+        const x = (u * 2 - 1) * width;
+        X[i] = x; Y[i] = y; Z[i] = -0.13 - v * 0.12 - 0.06 * Math.sin(t * 2.2 - v * 4 + u * 3) * v;
+      } else if (k === 8) {                                        // plume over the helmet and down the back
+        const u = P[i * 3], a = lerp(-0.2, Math.PI + 0.5, u);
+        X[i] = Q[i * 3 + 1] * 0.012 * (1 + u); Y[i] = 0.66 + Math.sin(a) * 0.18 * (u < 0.7 ? 1 : 1 - (u - 0.7) * 1.2) + Q[i * 3 + 2] * 0.01 - (u > 0.75 ? (u - 0.75) * 0.6 : 0);
+        Z[i] = Math.cos(a) * 0.15 - 0.02 + 0.02 * Math.sin(t * 3 + u * 6) * u;
+      } else if (k === 9) { X[i] = P[i * 3] * 0.045 + P[i * 3 + 1]; Y[i] = 0.655 + P[i * 3 + 2]; Z[i] = 0.12; BR[i] = 3.2 * (1 + S.level); }
+      else {                                                       // floating motes
+        const a = Math.atan2(P[i * 3 + 2], P[i * 3]) + t * 0.12, r = Math.hypot(P[i * 3], P[i * 3 + 2]);
+        X[i] = Math.cos(a) * r; Y[i] = P[i * 3 + 1] + 0.05 * Math.sin(t + r * 9); Z[i] = Math.sin(a) * r;
+      }
+    }
+    const turn = 0.35 * Math.sin(t * 0.3) + (this.pose === 'attack' && at < 1.5 ? -0.25 : 0);
+    const m = rotMat(turn, 0.05, 0);
+    applyMat(this, m, 1.0, 0, -0.05, 0);
+    this.focus = xf(m, 1, [0, -0.05, 0], [haR[0] + sw[0] * 0.6, haR[1] + sw[1] * 0.6, haR[2] + sw[2] * 0.6]);
+    if (this.pendingRing) { this.pendingRing = false; addRing(this.focus, 0.8); }
+    this.center = [0, 0, 0];
+  },
+});
+
+// ---------------------------------------------------------------- PLANET
+makeForm('planet', 'Planet', {
+  palette: [[0.5, 0.28, 0.16], [1.0, 0.78, 0.5], [0.75, 0.9, 1.0]], glow: 0.14,
+  init() {
+    const kind = this.kind = new Uint8Array(N), A = this.A = new Float32Array(N), B = this.B = new Float32Array(N), C = this.C = new Float32Array(N);
+    const c = counts([0.4, 0.42, 0.06, 0.05, 0.07]);
+    let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) { kind[i] = 0; A[i] = Math.acos(1 - 2 * (j + 0.5) / c[0]); B[i] = (j * GA) % TAU; C[i] = Math.random(); }
+    for (let j = 0; j < c[1]; j++, i++) {
+      let r; do { r = 0.56 + Math.random() * 0.46; } while ((r > 0.72 && r < 0.76 && Math.random() < 0.92) || (r > 0.9 && r < 0.915 && Math.random() < 0.85));
+      kind[i] = 1; A[i] = r; B[i] = Math.random() * TAU; C[i] = gauss();
+    }
+    for (let j = 0; j < c[2]; j++, i++) { kind[i] = 2; A[i] = j % 2; B[i] = Math.acos(2 * Math.random() - 1); C[i] = Math.random() * TAU; }
+    for (let j = 0; j < c[3]; j++, i++) { kind[i] = 3; A[i] = Math.acos(2 * Math.random() - 1); B[i] = Math.random() * TAU; C[i] = Math.random(); }
+    for (; i < N; i++) { kind[i] = 4; A[i] = Math.acos(2 * Math.random() - 1); B[i] = Math.random() * TAU; C[i] = Math.random(); }
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, kind = this.kind, A = this.A, B = this.B, C = this.C;
+    const R = 0.38 * (1 + 0.04 * S.beat + 0.03 * S.level);
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k === 0) {
+        const th = A[i], ph = B[i] + t * 0.18, st = Math.sin(th), ct = Math.cos(th);
+        X[i] = st * Math.cos(ph) * R; Y[i] = ct * R; Z[i] = st * Math.sin(ph) * R;
+        const band = 0.5 + 0.5 * Math.sin(ct * 16 + Math.sin(ph * 3) * 0.35);
+        const storm = Math.exp(-(Math.pow(ct + 0.35, 2) * 60 + Math.pow(wrapAng(ph - t * 0.05 - 1.2), 2) * 8));
+        TN[i] = 0.18 + 0.55 * band + storm * 0.3; BR[i] = 0.7 + 0.4 * band + storm * 1.2;
+      } else if (k === 1) {
+        const r = A[i], ang = B[i] + t * 0.5 / Math.pow(r / 0.6, 1.5);
+        X[i] = Math.cos(ang) * r; Y[i] = C[i] * 0.005; Z[i] = Math.sin(ang) * r;
+        TN[i] = 0.62 + 0.3 * (0.5 + 0.5 * Math.sin(r * 90)); BR[i] = 0.65 + 0.35 * Math.sin(r * 55) * Math.sin(r * 55);
+      } else if (k === 2) {
+        const mo = A[i], orb = mo ? 1.2 : 1.42, ang = t * (mo ? 0.5 : 0.33) + mo * 2, rr = mo ? 0.045 : 0.032, st = Math.sin(B[i]);
+        X[i] = Math.cos(ang) * orb + st * Math.cos(C[i]) * rr; Y[i] = Math.sin(ang) * orb * 0.18 + Math.cos(B[i]) * rr; Z[i] = Math.sin(ang) * orb + st * Math.sin(C[i]) * rr;
+        TN[i] = 0.85; BR[i] = 1.25;
+      } else if (k === 3) {
+        const r = R * (1.04 + C[i] * 0.07), st = Math.sin(A[i]);
+        X[i] = st * Math.cos(B[i]) * r; Y[i] = Math.cos(A[i]) * r; Z[i] = st * Math.sin(B[i]) * r;
+        TN[i] = 0.9; BR[i] = 0.3;
+      } else {
+        const r = 1.3 + C[i] * 0.8, st = Math.sin(A[i]), ph = B[i] + t * 0.02;
+        X[i] = st * Math.cos(ph) * r; Y[i] = Math.cos(A[i]) * r; Z[i] = st * Math.sin(ph) * r;
+        TN[i] = 0.7; BR[i] = 0.22;
+      }
+    }
+    applyMat(this, rotMat(t * 0.05, 0.42, 0.28), 1.0, 0, 0, 0);
+    this.focus = [0, 0, 0]; this.center = [0, 0, 0];
+  },
+});
+
+// ---------------------------------------------------------------- BUTTERFLY
+makeForm('butterfly', 'Butterfly', {
+  palette: [[0.36, 0.1, 0.62], [0.2, 0.62, 1.0], [0.82, 1.0, 1.0]], glow: 0.12,
+  init() {
+    const kind = this.kind = new Uint8Array(N), P = this.P = new Float32Array(N * 3), side = this.side = new Float32Array(N);
+    const TN = this.tone, BR = this.bright;
+    const FORE = [[0.0, 0.03], [0.18, 0.24], [0.42, 0.42], [0.68, 0.46], [0.84, 0.36], [0.82, 0.18], [0.62, 0.02], [0.32, -0.04], [0.0, -0.02]];
+    const HIND = [[0.0, -0.02], [0.28, -0.06], [0.52, -0.16], [0.62, -0.36], [0.5, -0.58], [0.3, -0.6], [0.14, -0.44], [0.03, -0.18]];
+    const inside = (poly, x, y) => { let c = false; for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) { const [xa, ya] = poly[a], [xb, yb] = poly[b]; if ((ya > y) !== (yb > y) && x < (xb - xa) * (y - ya) / (yb - ya) + xa) c = !c; } return c; };
+    const edgeDist = (poly, x, y) => { let d = 9; for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) { const [xa, ya] = poly[a], [xb, yb] = poly[b]; const dx = xb - xa, dy = yb - ya, u = clamp(((x - xa) * dx + (y - ya) * dy) / (dx * dx + dy * dy), 0, 1); d = Math.min(d, Math.hypot(x - xa - dx * u, y - ya - dy * u)); } return d; };
+    const c = counts([0.72, 0.06, 0.02, 0.2]);
+    let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) {
+      const fore = Math.random() < 0.58, poly = fore ? FORE : HIND;
+      let x, y; do { x = Math.random() * 0.86; y = fore ? -0.06 + Math.random() * 0.54 : -0.62 + Math.random() * 0.6; } while (!inside(poly, x, y));
+      const ed = edgeDist(poly, x, y);
+      const vein = Math.min(...[0.1, 0.35, 0.6, 0.85, 1.2].map(a => { const ang = fore ? a * 0.9 : -a * 0.9 - 0.2; const ca = Math.cos(ang), sa = Math.sin(ang); return Math.abs(-sa * x + ca * y) + (ca * x + sa * y < 0 ? 1 : 0); }));
+      const spot = fore ? Math.hypot(x - 0.55, y - 0.26) : Math.hypot(x - 0.38, y - 0.4);
+      let tone = 0.3 + 0.35 * Math.min(1, Math.hypot(x, y) * 1.4), br = 1.0;
+      if (ed < 0.045) { tone = 0.12; br = 1.15; if (Math.random() < 0.18 && ed > 0.012 && ed < 0.03) { tone = 1; br = 2.2; } }
+      if (vein < 0.009) { tone = 0.1; br = 0.9; }
+      if (spot < 0.055) { tone = spot < 0.022 ? 0.05 : 1; br = spot < 0.022 ? 0.9 : 1.9; }
+      kind[i] = 0; P[i * 3] = x; P[i * 3 + 1] = y; side[i] = j % 2 ? 1 : -1; TN[i] = tone; BR[i] = br;
+    }
+    for (let j = 0; j < c[1]; j++, i++) {                         // body + head
+      const u = Math.random(), y = lerp(-0.34, 0.3, u), r = y > 0.25 ? 0.038 : y > 0.02 ? 0.04 : 0.028 * (1 - Math.max(0, -y - 0.2) * 3), a = Math.random() * TAU;
+      kind[i] = 1; P[i * 3] = Math.cos(a) * r; P[i * 3 + 1] = y; P[i * 3 + 2] = Math.sin(a) * r; TN[i] = 0.15; BR[i] = 0.9;
+    }
+    for (let j = 0; j < c[2]; j++, i++) {                         // antennae
+      const s = j % 2 ? 1 : -1, u = Math.random();
+      kind[i] = 2; P[i * 3] = s * (0.02 + u * 0.14); P[i * 3 + 1] = 0.32 + u * 0.24 - u * u * 0.05; P[i * 3 + 2] = 0.02 + u * 0.05; TN[i] = u > 0.9 ? 1 : 0.4; BR[i] = u > 0.9 ? 2 : 1;
+    }
+    for (; i < N; i++) { kind[i] = 3; P[i * 3] = Math.random(); P[i * 3 + 1] = gauss(); P[i * 3 + 2] = gauss(); TN[i] = 0.95; BR[i] = 0.4; }  // sparkle trail
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, BR = this.bright, kind = this.kind, P = this.P, side = this.side;
+    const w = TAU * 1.6, fl = 0.5 + 0.5 * Math.sin(w * t);
+    const phi = 0.12 + 1.15 * Math.pow(fl, 1.4);
+    const cp = Math.cos(phi), sp = Math.sin(phi);
+    const bob = 0.06 * Math.sin(w * t - 1.2);
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k === 0) {
+        const x = P[i * 3], y = P[i * 3 + 1], s = side[i];
+        X[i] = s * x * cp * 1.15; Y[i] = y * 1.15 + 0.1; Z[i] = x * sp * 1.15;
+      } else if (k === 1 || k === 2) { X[i] = P[i * 3]; Y[i] = P[i * 3 + 1] + 0.1; Z[i] = P[i * 3 + 2]; }
+      else {
+        const age = fract(P[i * 3] + t * 0.25);
+        X[i] = P[i * 3 + 1] * 0.08 * (1 + age) - 0.25 * Math.sin(t * 0.5 - age * 2) * age; Y[i] = -0.2 - age * 0.9 + P[i * 3 + 2] * 0.04; Z[i] = -age * 0.2;
+        BR[i] = 0.9 * (1 - age);
+      }
+    }
+    const m = rotMat(0.25 * Math.sin(t * 0.4), -0.55, 0.12 * Math.sin(t * 0.7));
+    const tr = [0.12 * Math.sin(t * 0.5), bob, 0];
+    applyMat(this, m, 0.95 * (1 + 0.04 * S.beat), tr[0], tr[1], tr[2]);
+    this.focus = tr; this.center = tr;
+  },
+});
+
+// ---------------------------------------------------------------- HEART
+makeForm('heart', 'Heart', {
+  palette: [[0.5, 0.02, 0.16], [1.0, 0.24, 0.45], [1.0, 0.82, 0.9]], glow: 0.18,
+  init() {
+    const kind = this.kind = new Uint8Array(N), P = this.P = new Float32Array(N * 3);
+    const TN = this.tone, BR = this.bright;
+    const F = (x, y, z) => Math.pow(x * x + 2.25 * z * z + y * y - 1, 3) - x * x * y * y * y - 0.1125 * z * z * y * y * y;
+    const c = counts([0.62, 0.2, 0.18]);
+    let i = 0;
+    const surf = [];
+    for (let j = 0; j < c[0] + c[1]; j++) {
+      const d = norm3([gauss(), gauss(), gauss()]);
+      let lo = 0, hi = 2;
+      for (let s = 0; s < 22; s++) { const m = (lo + hi) / 2; if (F(d[0] * m, d[1] * m, d[2] * m) < 0) lo = m; else hi = m; }
+      surf.push([d[0] * lo, d[1] * lo, d[2] * lo]);
+    }
+    for (let j = 0; j < c[0]; j++, i++) { const p = surf[j]; kind[i] = 0; P[i * 3] = p[0]; P[i * 3 + 1] = p[1]; P[i * 3 + 2] = p[2]; TN[i] = 0.35 + 0.35 * (p[1] + 1.2) / 2.4; BR[i] = 1.1; }
+    for (let j = 0; j < c[1]; j++, i++) { const p = surf[c[0] + j], s = Math.cbrt(Math.random()) * 0.85; kind[i] = 1; P[i * 3] = p[0] * s; P[i * 3 + 1] = p[1] * s; P[i * 3 + 2] = p[2] * s; TN[i] = 0.9; BR[i] = 0.45; }
+    for (; i < N; i++) { kind[i] = 2; P[i * 3] = Math.random() * TAU; P[i * 3 + 1] = Math.random(); P[i * 3 + 2] = 0.9 + Math.random() * 0.8; TN[i] = 0.95; BR[i] = 0.5; }
+    this.lastBeat = -1;
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, BR = this.bright, kind = this.kind, P = this.P;
+    const period = S.music > 0.5 ? clamp(music.period || 60 / 118, 0.35, 1.2) : 0.9;   // beats with the song
+    const ph = fract(t / period);
+    const pulse = Math.exp(-Math.pow(ph / 0.06, 2)) + 0.6 * Math.exp(-Math.pow((ph - 0.24) / 0.07, 2));
+    const sc = 0.4 * (1 + 0.1 * pulse + 0.06 * S.level);
+    if (ph < this.lastPh) addRing([0, 0, 0], 0.7);
+    this.lastPh = ph;
+    for (let i = 0; i < N; i++) {
+      const k = kind[i];
+      if (k <= 1) { X[i] = P[i * 3] * sc; Y[i] = P[i * 3 + 1] * sc; Z[i] = P[i * 3 + 2] * sc; if (k === 1) BR[i] = 0.4 + 0.9 * pulse; }
+      else {
+        const a = P[i * 3] + t * 0.3, u = fract(P[i * 3 + 1] + t * 0.08), r = P[i * 3 + 2] * sc * 1.6;
+        X[i] = Math.cos(a) * r; Y[i] = (u * 2 - 1) * 0.9; Z[i] = Math.sin(a) * r; BR[i] = 0.5 * Math.sin(Math.PI * u);
+      }
+    }
+    applyMat(this, rotMat(0.45 * Math.sin(t * 0.5), 0.12, 0), 1, 0, 0.05, 0);
+    this.focus = [0, 0.05, 0]; this.center = [0, 0.05, 0];
+  },
+});
+
+// ---------------------------------------------------------------- GALAXY
+makeForm('galaxy', 'Galaxy', {
+  palette: [[0.3, 0.26, 0.85], [0.55, 0.75, 1.0], [1.0, 0.94, 0.84]], glow: 0.2,
+  init() {
+    const A = this.A = new Float32Array(N), B = this.B = new Float32Array(N), C = this.C = new Float32Array(N);
+    const TN = this.tone, BR = this.bright;
+    for (let i = 0; i < N; i++) {
+      const k = Math.random();
+      let r, ang, h;
+      if (k < 0.15) { r = Math.abs(gauss()) * 0.09; ang = Math.random() * TAU; h = gauss() * 0.035; }
+      else if (k < 0.86) { r = 0.13 + Math.pow(Math.random(), 1.3) * 0.84; ang = Math.floor(Math.random() * 3) * TAU / 3 + r * 5.3 + gauss() * (0.26 - r * 0.11); r = Math.max(0.02, r + gauss() * 0.022); h = gauss() * 0.02 * (1.25 - r); }
+      else { r = 0.08 + Math.random() * 0.95; ang = Math.random() * TAU; h = gauss() * 0.05; }
+      A[i] = r; B[i] = ang; C[i] = h; TN[i] = clamp(1 - r * 1.2, 0, 1); BR[i] = 0.6 + (r < 0.12 ? 0.8 : 0);
+    }
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, A = this.A, B = this.B, C = this.C;
+    const spin = t * (0.06 + 0.25 * S.think);
+    for (let i = 0; i < N; i++) {
+      const ang = B[i] + spin * (0.2 / (A[i] + 0.1)) * 5;
+      X[i] = Math.cos(ang) * A[i]; Y[i] = C[i]; Z[i] = Math.sin(ang) * A[i];
+    }
+    applyMat(this, rotMat(0, 0.95, 0.15), 1.45 * (1 + 0.05 * S.beat), 0, 0, 0);
+    this.focus = [0, 0, 0]; this.center = [0, 0, 0];
+  },
+});
+
+// ---------------------------------------------------------------- MUSIC forms (she picks one by how the song feels)
+const bandAt = x => { const f = clamp(x, 0, 0.999) * BANDS; return music.bands[f | 0]; };
+makeForm('pulse', 'Music: pulse', {
+  palette: [[0.55, 0.05, 0.5], [1.0, 0.3, 0.55], [1.0, 0.9, 0.6]], glow: 0.2,
+  init() {
+    this.A = new Float32Array(N); this.B = new Float32Array(N); this.C = new Float32Array(N); this.k = new Uint8Array(N);
+    const c = counts([0.8, 0.08, 0.12]); let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) { this.k[i] = 0; this.A[i] = Math.acos(1 - 2 * (j + 0.5) / c[0]); this.B[i] = (j * GA) % TAU; this.C[i] = Math.random(); }
+    for (let j = 0; j < c[1]; j++, i++) { this.k[i] = 1; this.A[i] = Math.acos(2 * Math.random() - 1); this.B[i] = Math.random() * TAU; this.C[i] = Math.random(); }
+    for (; i < N; i++) { this.k[i] = 2; this.A[i] = Math.acos(2 * Math.random() - 1); this.B[i] = Math.random() * TAU; this.C[i] = Math.random(); }
+    this.rot = 0;
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, A = this.A, B = this.B, C = this.C, k = this.k;
+    this.rot += dt * (0.2 + music.energy * 1.5);
+    const R = 0.36 * (1 + 0.18 * music.beat + 0.1 * music.bass);
+    for (let i = 0; i < N; i++) {
+      const th = A[i], ph = B[i] + this.rot, st = Math.sin(th), ct = Math.cos(th);
+      if (k[i] === 0) {
+        const v = bandAt(0.5 + 0.5 * Math.sin(3 * th + 1) * Math.cos(2 * B[i])), spike = C[i] > 0.9 ? 1 + 2.4 * v : 1;
+        const r = R * (1 + 0.55 * v) * spike;
+        X[i] = st * Math.cos(ph) * r; Y[i] = ct * r; Z[i] = st * Math.sin(ph) * r;
+        TN[i] = 0.2 + 0.8 * v; BR[i] = 0.55 + 1.5 * v + (C[i] > 0.9 ? 0.5 : 0);
+      } else if (k[i] === 1) {
+        const r = 0.12 * (1 + music.bass * 1.2) * Math.cbrt(C[i]);
+        X[i] = st * Math.cos(ph * 2) * r; Y[i] = ct * r; Z[i] = st * Math.sin(ph * 2) * r; TN[i] = 0.95; BR[i] = 1.4 + music.beat;
+      } else {
+        const v = bandAt(0.6 + C[i] * 0.4), r = 0.9 + C[i] * 0.6 + music.beat * 0.2;
+        X[i] = st * Math.cos(ph * 0.3) * r; Y[i] = ct * r; Z[i] = st * Math.sin(ph * 0.3) * r; TN[i] = 0.9; BR[i] = 0.2 + v * 1.8;
+      }
+    }
+    applyMat(this, rotMat(0, 0.3, 0.1), 1, 0, 0, 0);
+    this.focus = [0, 0, 0]; this.center = [0, 0, 0];
+  },
+});
+makeForm('eqring', 'Music: ring', {
+  palette: [[0.1, 0.25, 0.7], [0.3, 0.85, 1.0], [0.95, 1.0, 0.75]], glow: 0.16,
+  init() {
+    this.k = new Uint8Array(N); this.A = new Float32Array(N); this.B = new Float32Array(N); this.C = new Float32Array(N);
+    const c = counts([0.74, 0.12, 0.06, 0.08]); let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) { this.k[i] = 0; this.A[i] = j % 96; this.B[i] = Math.random(); this.C[i] = (Math.random() - 0.5); }
+    for (let j = 0; j < c[1]; j++, i++) { this.k[i] = 1; this.A[i] = Math.random(); this.B[i] = gauss(); }
+    for (let j = 0; j < c[2]; j++, i++) { this.k[i] = 2; this.A[i] = Math.acos(2 * Math.random() - 1); this.B[i] = Math.random() * TAU; this.C[i] = Math.random(); }
+    for (; i < N; i++) { this.k[i] = 3; this.A[i] = Math.random() * TAU; this.B[i] = Math.random(); this.C[i] = Math.random(); }
+    this.rot = 0;
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, A = this.A, B = this.B, C = this.C, k = this.k;
+    this.rot += dt * (0.12 + music.energy * 0.5);
+    const base = 0.42 * (1 + 0.08 * music.beat);
+    for (let i = 0; i < N; i++) {
+      if (k[i] === 0) {
+        const bar = A[i], ang = bar / 96 * TAU + this.rot, band = bar < 48 ? bar : 95 - bar;
+        const v = music.bands[Math.floor(band / 48 * BANDS)] || 0;
+        const len = 0.03 + 0.55 * v, u = B[i], r = base + u * len;
+        const w = C[i] * 0.022;
+        X[i] = Math.cos(ang) * r - Math.sin(ang) * w; Y[i] = Math.sin(ang) * r + Math.cos(ang) * w; Z[i] = (Math.random() - 0.5) * 0.01;
+        TN[i] = 0.2 + u * 0.8 * (0.4 + v); BR[i] = 0.6 + 1.6 * v * (0.4 + u);
+      } else if (k[i] === 1) {
+        const a = A[i] * TAU, wv = music.wave[Math.floor(A[i] * 127)] || 0, r = base * 0.72 + wv * 0.08 + B[i] * 0.004;
+        X[i] = Math.cos(a) * r; Y[i] = Math.sin(a) * r; Z[i] = 0; TN[i] = 0.95; BR[i] = 1.1;
+      } else if (k[i] === 2) {
+        const r = 0.09 * Math.cbrt(C[i]) * (1 + music.bass), st = Math.sin(A[i]);
+        X[i] = st * Math.cos(B[i] + t) * r; Y[i] = Math.cos(A[i]) * r; Z[i] = st * Math.sin(B[i] + t) * r; TN[i] = 1; BR[i] = 1.5 + music.beat;
+      } else {
+        const age = fract(B[i] + t * 0.2 + music.beat * 0.02), r = base + 0.1 + age * 0.9, a = A[i] + this.rot * 0.5;
+        X[i] = Math.cos(a) * r; Y[i] = Math.sin(a) * r; Z[i] = -0.1; TN[i] = 0.8; BR[i] = 0.5 * (1 - age) * (0.3 + music.energy * 2);
+      }
+    }
+    applyMat(this, rotMat(0.25 * Math.sin(t * 0.3), 0.3 * Math.sin(t * 0.23), 0), 1, 0, 0, 0);
+    this.focus = [0, 0, 0]; this.center = [0, 0, 0];
+  },
+});
+makeForm('waves', 'Music: waves', {
+  palette: [[0.05, 0.3, 0.45], [0.3, 0.95, 0.85], [0.85, 1.0, 1.0]], glow: 0.12,
+  init() {
+    this.A = new Float32Array(N); this.B = new Float32Array(N);
+    const cols = 160, rows = Math.floor(N / cols);
+    for (let i = 0; i < N; i++) { const cx = i % cols, cy = Math.floor(i / cols) % rows; this.A[i] = cx / (cols - 1) * 2 - 1 + (Math.random() - 0.5) * 0.004; this.B[i] = cy / (rows - 1) * 2 - 1; }
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, A = this.A, B = this.B;
+    const b = music.bands;
+    const a1 = 0.06 + b[2] * 0.2, a2 = 0.04 + b[10] * 0.16, a3 = 0.025 + b[22] * 0.12, a4 = b[34] * 0.1;
+    for (let i = 0; i < N; i++) {
+      const x = A[i] * 1.25, z = B[i] * 1.0;
+      const d = Math.hypot(x, z);
+      let h = a1 * Math.sin(x * 2.2 + t * 0.9) + a2 * Math.sin(z * 3.4 - t * 1.3 + x) + a3 * Math.sin((x + z) * 6 - t * 2.2) + a4 * Math.sin(d * 12 - t * 5)
+            + music.beat * 0.08 * Math.exp(-d * d * 3) * Math.cos(d * 10 - t * 8);
+      X[i] = x; Y[i] = h; Z[i] = z;
+      const hn = clamp(h * 4 + 0.5, 0, 1);
+      TN[i] = 0.15 + 0.8 * hn; BR[i] = (0.8 + 1.6 * hn) * (1 - smooth(0.85, 1.3, d));
+    }
+    applyMat(this, rotMat(t * 0.05, 0.5, 0), 0.85, 0, -0.08, 0);
+    this.focus = [0, 0, 0]; this.center = [0, 0, 0];
+  },
+});
+
+// ================================================================ UNIVERSE: the Nexus and her six beings (universes.py)
+// The Nexus star (Raziel) in the middle; one galaxy per being on a tilted orbit around it; each being's
+// helpers as small stars on rings around its galaxy. universes.py says which being is working ("focus"):
+// the camera flies into that galaxy. Colours: a particle's tone >= 10 means "universe k's own colour"
+// (tone = 10 + k + whiteness; the other forms use 0..2), so eight colours share one draw call (see the
+// vertex shader).
+const UNI = {
+  nexus: { key: 'nexus', name: 'Raziel', title: 'The Nexus', color: '#ffb84d', glyph: '核', helpers: ['Memory', 'Conversation', 'Calculator', 'Briefing'] },
+  beings: [
+    { key: 'music', name: 'Melody', title: 'The Music', color: '#ff5cb8', glyph: '音', helpers: ['Spotify', 'YouTube', 'Playlists', 'Queue', 'Dance'] },
+    { key: 'messages', name: 'Hermes', title: 'The Messenger', color: '#4be38a', glyph: '信', helpers: ['WhatsApp', 'Gmail', 'Calendar', 'Contacts', 'Phone'] },
+    { key: 'knowledge', name: 'Athena', title: 'The Knowledge', color: '#b28cff', glyph: '知', helpers: ['Files', 'Notes', 'Web', 'ChatGPT', 'Gemini', 'Screen'] },
+    { key: 'forge', name: 'Atlas', title: 'The Forge', color: '#ff7a33', glyph: '創', helpers: ['Apps', 'Folders', 'Typing', 'Screenshots', 'Volume', 'Windows'] },
+    { key: 'time', name: 'Chronos', title: 'The Keeper of Time', color: '#47d4ff', glyph: '時', helpers: ['Reminders', 'Timers', 'To-do', 'Weather', 'News', 'Briefing'] },
+    { key: 'shield', name: 'Sentinel', title: 'The Shield', color: '#ff4d5e', glyph: '盾', helpers: ['Voice ID', 'Lock', 'Quiet mode', 'Phone link', 'Camera'] },
+  ],
+  focus: null,          // a being's key, or null = the whole universe
+  big: false,           // "show me the universe": the window is big
+  home: 'universe',
+};
+const G6 = 6;           // galaxies (the map always has six places; fewer beings leave a place empty)
+const hexRgb = h => { const s = String(h || '').replace('#', ''); const v = parseInt(s.length === 6 ? s : 'ffffff', 16); return [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255]; };
+const uniRgb = new Float32Array(24);                  // 8 colours for the shader: the nexus, the six, the dust
+function uniColours() {
+  const all = [UNI.nexus].concat(UNI.beings.slice(0, G6));
+  for (let k = 0; k < 7; k++) { const c = hexRgb((all[k] || UNI.nexus).color); uniRgb[k * 3] = c[0]; uniRgb[k * 3 + 1] = c[1]; uniRgb[k * 3 + 2] = c[2]; }
+  uniRgb[21] = 0.5; uniRgb[22] = 0.58; uniRgb[23] = 0.92;                // dust: a cold blue-white
+}
+uniColours();
+function focusIndex() {                               // 0..5, -1 = none, 6 = the nexus itself
+  if (!UNI.focus) return -1;
+  if (UNI.focus === 'nexus') return 6;
+  return UNI.beings.findIndex(b => b.key === UNI.focus);
+}
+function onUniverse(msg) {
+  if (Array.isArray(msg.beings) && msg.beings.length) {
+    UNI.beings = msg.beings.slice(0, G6).map(b => ({ key: String(b.key || ''), name: String(b.name || ''), title: String(b.title || ''),
+      color: String(b.color || '#ffffff'), glyph: String(b.glyph || ''), helpers: (Array.isArray(b.helpers) ? b.helpers : []).map(String).slice(0, 6) }));
+  }
+  if (msg.nexus && typeof msg.nexus === 'object') UNI.nexus = Object.assign({}, UNI.nexus, msg.nexus);
+  if (msg.home) UNI.home = String(msg.home);
+  if ('focus' in msg) UNI.focus = msg.focus ? String(msg.focus) : null;
+  if ('big' in msg) UNI.big = !!msg.big;
+  uniColours();
+}
+
+makeForm('universe', 'Universe', {
+  palette: [[0.02, 0.03, 0.10], [0.36, 0.42, 0.95], [0.85, 0.88, 1.0]], moodWeight: 0.08, glow: 0.14,
+  init() {
+    const k = this.k = new Uint8Array(N), g = this.g = new Uint8Array(N);
+    const A = this.A = new Float32Array(N), B = this.B = new Float32Array(N), C = this.C = new Float32Array(N);
+    const c = counts([0.05, 0.035, 0.54, 0.055, 0.04, 0.05, 0.23]);
+    let i = 0;
+    for (let j = 0; j < c[0]; j++, i++) { k[i] = 0; A[i] = Math.acos(2 * Math.random() - 1); B[i] = Math.random() * TAU; C[i] = Math.pow(Math.random(), 2.2); }   // nexus star
+    for (let j = 0; j < c[1]; j++, i++) { k[i] = 1; g[i] = j % 2; A[i] = Math.random() * TAU; B[i] = gauss(); C[i] = Math.random(); }                       // its two rings
+    for (let j = 0; j < c[2]; j++, i++) {                                                                                                                     // six spiral galaxies
+      k[i] = 2; g[i] = j % G6;
+      const kk = Math.random();
+      if (kk < 0.26) { A[i] = Math.abs(gauss()) * 0.14; B[i] = Math.random() * TAU; }                                       // bulge
+      else if (kk < 0.36) { A[i] = 0.1 + Math.random() * 0.9; B[i] = Math.random() * TAU; }                                // a faint round halo
+      else { const r = 0.12 + Math.pow(Math.random(), 1.2) * 0.88; A[i] = r; B[i] = (j % 2) * Math.PI + r * 5.2 + gauss() * (0.42 - r * 0.16); }   // two arms
+      C[i] = gauss() * 0.04 * (1.2 - A[i]);
+    }
+    for (let j = 0; j < c[3]; j++, i++) { k[i] = 3; g[i] = j % G6; A[i] = Math.random() * TAU; B[i] = Math.floor(Math.random() * 3); C[i] = Math.random(); }  // helper rings
+    for (let j = 0; j < c[4]; j++, i++) { k[i] = 4; g[i] = j % G6; B[i] = Math.floor(j / G6) % 6; A[i] = Math.acos(2 * Math.random() - 1); C[i] = Math.random() * TAU; }   // helper stars
+    for (let j = 0; j < c[5]; j++, i++) { k[i] = 5; g[i] = j % 3; A[i] = Math.random() * TAU; B[i] = gauss(); C[i] = Math.random(); }                       // the big orbits
+    for (; i < N; i++) { k[i] = 6; A[i] = Math.sqrt(Math.random()) * 1.7; B[i] = Math.random() * TAU; C[i] = Math.random(); }                                 // dust and far stars
+    this.camC = [0, 0, 0]; this.camZ = 1; this.F = 0; this.spin = 0;
+    this.gal = Array.from({ length: G6 }, () => [0, 0, 0]);   // galaxy centres (world, before the camera)
+    this.anchors = { nexus: [0, 0, 0], gal: Array.from({ length: G6 }, () => [0, 0, 0]), help: Array.from({ length: G6 * 6 }, () => [0, 0, 0]), zoom: 1 };
+    this.focusShown = -1;
+  },
+  update(t, dt, S) {
+    const X = this.x, Y = this.y, Z = this.z, TN = this.tone, BR = this.bright, k = this.k, g = this.g, A = this.A, B = this.B, C = this.C;
+    const fi = focusIndex();
+    if (fi >= 0) this.focusShown = fi;
+    const shown = this.focusShown;
+    // the camera: whole universe, or flown into one galaxy
+    const RG = 0.72, YS = 0.62, ZS = 0.8, RING = [0.2, 0.27, 0.34], GS = 0.145;
+    this.spin += dt * (0.004 + 0.02 * S.think);
+    for (let q = 0; q < G6; q++) {
+      const a = -Math.PI / 2 + q * TAU / G6 + this.spin;
+      const xp = Math.cos(a) * RG, zp = Math.sin(a) * RG;
+      this.gal[q] = [xp, -zp * YS + 0.02, zp * ZS];
+    }
+    // the helpers' places (the rings open up around the galaxy the camera is on)
+    for (let q = 0; q < G6; q++) {
+      const b = UNI.beings[q], nh = b ? Math.max(1, b.helpers.length) : 0, gc = this.gal[q];
+      for (let h = 0; h < 6; h++) {
+        const rr = RING[h % 3] * (0.62 + 0.38 * (q === shown ? this.F : 0));
+        const ang = h * TAU / Math.max(1, nh) + 0.7 + t * (0.03 + 0.01 * (h % 3));
+        this.anchors.help[q * 6 + h] = [gc[0] + Math.cos(ang) * rr, gc[1] - Math.sin(ang) * rr * 0.5, gc[2] + Math.sin(ang) * rr * 0.85, h < nh ? 1 : 0];
+      }
+    }
+    let tc = [0, 0, 0], tz = 1.0;
+    const FZ = 2.6, FY = -0.26;
+    if (fi >= 0 && fi < G6) { const gc = this.gal[fi]; tc = [gc[0], gc[1] - FY / FZ, gc[2]]; tz = FZ; }
+    else if (fi === 6) { tc = [0, -FY / 2.2, 0]; tz = 2.2; }
+    const rate = 1.7 * MOTION;
+    for (let d = 0; d < 3; d++) this.camC[d] = approach(this.camC[d], tc[d], rate, dt);
+    this.camZ = approach(this.camZ, tz, rate, dt);
+    const F = this.F = clamp((this.camZ - 1) / (FZ - 1), 0, 1);
+    const cz = this.camZ, cc = this.camC;
+    const talk = 1 + 0.35 * S.level + 0.25 * S.beat, wake = 0.4 + 0.6 * S.awake;
+    const nexusGlow = (fi < 0 || fi === 6) ? talk : 1;
+    const Fprev = this.F;
+    const spinG = t * (0.05 + 0.18 * S.think);
+    for (let i = 0; i < N; i++) {
+      let x, y, z, tone, br;
+      switch (k[i]) {
+        case 0: {                                                         // the nexus star
+          const r = 0.08 * C[i] * nexusGlow * (1 + 0.1 * S.beat), st = Math.sin(A[i]), ph = B[i] + t * 0.3;
+          x = st * Math.cos(ph) * r; y = Math.cos(A[i]) * r; z = st * Math.sin(ph) * r;
+          tone = 10 + 0.25 + 0.7 * (1 - C[i]); br = 1.3 + 1.6 * (1 - C[i]) * nexusGlow;
+          break;
+        }
+        case 1: {                                                         // two thin rings around it
+          const rr = (g[i] ? 0.24 : 0.165) + B[i] * 0.003, ang = A[i] + t * (g[i] ? -0.12 : 0.2) * (1 + 3 * S.think);
+          const xp = Math.cos(ang) * rr, zp = Math.sin(ang) * rr, tilt = g[i] ? 0.35 : -0.25;
+          x = xp; y = -zp * 0.42 + xp * tilt * 0.3; z = zp * 0.9;
+          tone = 10.35; br = (C[i] < 0.25 ? 0.5 : 0.14) + 1.1 * Math.exp(-Math.pow(wrapAng(A[i] + t * 0.6), 2) * 3) * wake;
+          break;
+        }
+        case 2: {                                                         // a galaxy: two arms and a bulge
+          const q = g[i], gc = this.gal[q], r = A[i], ang = B[i] + spinG * (0.25 / (r + 0.15));
+          const s = GS * (1 + 0.55 * (q === shown ? F : 0)) * (q === fi ? talk : 1) * (1 + 0.06 * S.beat);
+          const u = Math.cos(ang) * r * s, v = Math.sin(ang) * r * s;
+          x = gc[0] + u; y = gc[1] - v * 0.5 + C[i] * s; z = gc[2] + v * 0.85;
+          tone = 11 + q + clamp(0.75 - r * 0.9, 0, 0.9); br = (r < 0.14 ? 1.9 : 0.6 + 0.6 * (1 - r)) * (fi >= 0 && fi !== q ? 1 - 0.97 * F : 1);
+          break;
+        }
+        case 3: {                                                         // rings where a galaxy's helpers live
+          const q = g[i], gc = this.gal[q], rr = RING[B[i]] * (0.62 + 0.38 * (q === shown ? F : 0)), ang = A[i] + t * 0.015;
+          x = gc[0] + Math.cos(ang) * rr; y = gc[1] - Math.sin(ang) * rr * 0.5; z = gc[2] + Math.sin(ang) * rr * 0.85;
+          tone = 11 + q + 0.35; br = (C[i] < 0.5 ? 0.16 : 0.05) * (q === shown ? 1 + 2.2 * F : 0.6 * (1 - F));
+          break;
+        }
+        case 4: {                                                         // helper stars
+          const q = g[i], h = B[i], hp = this.anchors.help[q * 6 + h];
+          const cr = 0.006 + 0.006 * Math.pow(Math.abs(Math.sin(C[i] * 7)), 3), st = Math.sin(A[i]);
+          x = hp[0] + st * Math.cos(C[i]) * cr; y = hp[1] + Math.cos(A[i]) * cr; z = hp[2] + st * Math.sin(C[i]) * cr;
+          tone = 11 + q + 0.55; br = hp[3] ? (0.9 + 0.8 * Math.sin(t * 2 + h)) * (q === shown ? 0.5 + 1.2 * F : 0.35 * (1 - F) + 0.15) : 0;
+          break;
+        }
+        case 5: {                                                         // the big orbits through the galaxies
+          const rr = RG * [1, 0.56, 1.28][g[i]] + B[i] * 0.004, ang = A[i] + this.spin;
+          const xp = Math.cos(ang) * rr, zp = Math.sin(ang) * rr;
+          x = xp; y = -zp * YS + 0.02; z = zp * ZS;
+          tone = g[i] === 0 ? 10.15 : 17.45; br = (C[i] < 0.3 ? 0.3 : 0.07) * (g[i] === 2 ? 0.5 : 1) * (1 - 0.7 * F);
+          break;
+        }
+        default: {                                                        // dust between them, far stars around
+          const r = A[i], ang = B[i] + t * 0.004;
+          x = Math.cos(ang) * r; y = (C[i] - 0.5) * 0.9 * (r > 1.2 ? 2.2 : 0.35) - Math.sin(ang) * r * 0.25; z = Math.sin(ang) * r * 0.6 - 0.3;
+          tone = 17 + 0.6 * C[i]; br = 0.07 + 0.2 * Math.max(0, Math.sin(t * (0.3 + C[i]) + C[i] * 50)) * (C[i] > 0.9 ? 3 : 1);
+        }
+      }
+      // the camera: fly to the focus and zoom
+      X[i] = (x - cc[0]) * cz; Y[i] = (y - cc[1]) * cz; Z[i] = (z - cc[2]) * cz * 0.6;
+      TN[i] = tone; BR[i] = br;
+    }
+    // where the labels go (p46_labels.js): the same camera
+    const cam = p => [(p[0] - cc[0]) * cz, (p[1] - cc[1]) * cz, (p[2] - cc[2]) * cz * 0.6];
+    this.anchors.nexus = cam([0, 0, 0]);
+    for (let q = 0; q < G6; q++) this.anchors.gal[q] = cam(this.gal[q]);
+    this.anchors.helpCam = this.anchors.help.map(p => cam(p));
+    this.anchors.zoom = cz; this.anchors.F = F; this.anchors.shown = shown;
+    // the glass takes the focused being's colour
+    const fc = shown >= 0 && shown < G6 && F > 0.02 ? hexRgb(UNI.beings[shown].color) : hexRgb(UNI.nexus.color);
+    const base = [0.36, 0.42, 0.95];
+    this.palette = [mix3([0.02, 0.03, 0.10], fc.map(v => v * 0.25), 0.4), mix3(base, fc, 0.5 + 0.35 * F), mix3([0.85, 0.88, 1.0], fc, 0.25)];
+    // the warm glow sits on the Nexus, or on the galaxy the camera is on
+    const gcen = shown >= 0 && shown < G6 ? this.anchors.gal[shown] : this.anchors.nexus;
+    this.center = mix3(this.anchors.nexus, gcen, F); this.focus = this.center;
+  },
+});
+
+// ================================================================ transitions: every particle flies from one form to the next
+const OUT = new Float32Array(N * 5);
+const SEED = new Float32Array(N * 4);
+for (let i = 0; i < N * 4; i++) SEED[i] = Math.random();
+const snap = { x: new Float32Array(N), y: new Float32Array(N), z: new Float32Array(N), tone: new Float32Array(N), bright: new Float32Array(N) };
+const trans = { to: ensure(forms.orb), p: 1, fromCenter: [0, 0, 0] };
+const palette = [MOODS.neutral.map(v => v * 0.3), MOODS.neutral.slice(), mix3(MOODS.neutral, [1, 1, 1], 0.65)];
+
+function setForm(id) {
+  if (!forms[id]) return false;
+  const f = ensure(forms[id]);
+  if (trans.to === f) return false;
+  for (let i = 0; i < N; i++) { snap.x[i] = OUT[i * 5]; snap.y[i] = OUT[i * 5 + 1]; snap.z[i] = OUT[i * 5 + 2]; snap.tone[i] = OUT[i * 5 + 3]; snap.bright[i] = OUT[i * 5 + 4]; }
+  trans.fromCenter = trans.to.center.slice();
+  trans.to = f; trans.p = 0;
+  return true;
+}
+
+function compose(t, dt, S) {
+  const f = trans.to;
+  f.update(t, dt, S);
+  if (trans.p < 1) trans.p = Math.min(1, trans.p + dt / 1.9);
+  const p = trans.p, c = mix3(trans.fromCenter, f.center, 0.5);
+  const X = f.x, Y = f.y, Z = f.z, TN = f.tone, BR = f.bright;
+  if (p >= 1) {
+    for (let i = 0; i < N; i++) { const o = i * 5; OUT[o] = X[i]; OUT[o + 1] = Y[i]; OUT[o + 2] = Z[i]; OUT[o + 3] = TN[i]; OUT[o + 4] = BR[i]; }
+    return;
+  }
+  for (let i = 0; i < N; i++) {
+    const d = SEED[i * 4] * 0.45;
+    let e = clamp((p - d) / 0.55, 0, 1); e = e * e * (3 - 2 * e);
+    const wv = Math.sin(Math.PI * e);
+    let x = lerp(snap.x[i], X[i], e) - c[0], y = lerp(snap.y[i], Y[i], e) - c[1], z = lerp(snap.z[i], Z[i], e) - c[2];
+    const sq = 1 - 0.45 * wv, ang = wv * (1.4 + SEED[i * 4 + 1] * 2.2), ca = Math.cos(ang), sa = Math.sin(ang);
+    x *= sq; y *= sq; z *= sq;
+    const o = i * 5;
+    OUT[o] = ca * x + sa * z + c[0]; OUT[o + 1] = y + c[1] + wv * 0.08 * (SEED[i * 4 + 2] - 0.5); OUT[o + 2] = -sa * x + ca * z + c[2];
+    // (tone >= 10 is "universe k's colour": never blended across - it would pass through the other colours)
+    OUT[o + 3] = (TN[i] >= 9.5 || snap.tone[i] >= 9.5) ? (e < 0.5 ? snap.tone[i] : TN[i]) : lerp(snap.tone[i], TN[i], e);
+    OUT[o + 4] = lerp(snap.bright[i], BR[i], e) * (1 + 0.9 * wv);
+  }
+}
+
+// ================================================================ WebGL
+// The scene (trails, stars, glow, particles) is drawn into an off-screen texture, then copied to the
+// window by one last pass: on the dark tile it is added onto the tile colour; in the see-through
+// window every pixel becomes either fully see-through or fully drawn (see the note at the top).
+const canvas = document.getElementById('gl');
+if (!OPAQUE) canvas.classList.add('cutout');
+const gl = canvas.getContext('webgl', { antialias: false, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: false });
+if (!gl) { document.getElementById('nogl').style.display = 'grid'; return; }
+// The GPU can drop the context (driver update, sleep/resume, a GPU reset): start over cleanly.
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); });
+canvas.addEventListener('webglcontextrestored', () => { location.reload(); });
+const compile = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+const program = (vs, fs) => { const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; };
+
+const VS = `
+  precision highp float;
+  attribute vec4 aP; attribute float aB; attribute vec4 aR;
+  uniform float uTime, uWake, uLevel, uBeat, uPR, uFade, uYaw, uPitch, uSize, uAlpha;
+  uniform vec2 uK;
+  uniform float uOffY;
+  uniform vec3 uC0, uC1, uC2, uCenter;
+  uniform vec3 uUni[8];
+  uniform vec3 uRingC[4]; uniform float uRingR[4]; uniform float uRingA[4];
+  varying vec3 vCol; varying float vA;
+  void main() {
+    vec3 p = aP.xyz;
+    float tone = aP.w, b = aB;
+    vec3 d = p - uCenter; float dl = length(d) + 1e-4;
+    p += d / dl * (uLevel * 0.03 + uBeat * 0.035) * (0.4 + aR.y);
+    float boost = 0.0;
+    for (int i = 0; i < 4; i++) { float k = length(p - uRingC[i]) - uRingR[i]; boost += exp(-k * k * 110.0) * uRingA[i]; }
+    float cy = cos(uYaw), sy = sin(uYaw), cp = cos(uPitch), sp = sin(uPitch);
+    p = vec3(p.x, cp * p.y - sp * p.z, sp * p.y + cp * p.z);
+    p = vec3(cy * p.x + sy * p.z, p.y, -sy * p.x + cy * p.z);
+    float persp = 3.4 / (3.4 - p.z);
+    gl_Position = vec4(p.xy * persp * uK + vec2(0.0, uOffY), 0.0, 1.0);
+    float tw = 0.78 + 0.22 * sin(uTime * (0.8 + aR.x * 2.6) + aR.z * 60.0);
+    vec3 col;
+    if (tone >= 9.5) {                           // the universe map: the Nexus's or a being's own colour
+      float kx = floor(tone - 10.0 + 1e-4), wx = clamp(tone - 10.0 - kx, 0.0, 1.0);
+      vec3 base = uUni[0];
+      for (int j = 1; j < 8; j++) { if (float(j) == kx) base = uUni[j]; }
+      col = mix(base, vec3(1.0), wx * 0.85);
+    } else {
+      col = tone < 0.5 ? mix(uC0, uC1, tone * 2.0) : mix(uC1, uC2, tone * 2.0 - 1.0);
+    }
+    col = mix(col, vec3(1.0), clamp((b - 1.7) * 0.22, 0.0, 0.45)) + boost * 0.3;
+    gl_PointSize = clamp((1.7 + aR.w * 1.5) * uPR * uSize * persp * (0.75 + 0.3 * min(b, 3.0)) * (1.0 + boost * 0.8 + uBeat * 0.25), 1.0, 16.0);
+    vCol = col;
+    vA = tw * clamp(b, 0.0, 4.0) * 0.3 * uAlpha * (0.28 + 0.72 * uWake) * (1.0 + boost * 1.4 + uBeat * 0.4) * uFade;
+  }`;
+const FS = `
+  precision mediump float;
+  varying vec3 vCol; varying float vA;
+  void main() {
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    float a = exp(-d * d * 2.4) * smoothstep(1.0, 0.5, d);
+    gl_FragColor = vec4(vCol, a * vA);
+  }`;
+const QUAD_VS = `attribute vec2 aPos; varying vec2 vP; void main() { vP = aPos; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+const FADE_FS = `precision mediump float; uniform vec4 uCol; void main() { gl_FragColor = uCol; }`;
+const GLOW_FS = `
+  precision mediump float;
+  varying vec2 vP;
+  uniform vec2 uC, uK; uniform float uI, uR; uniform vec3 uCol;
+  void main() {
+    vec2 d = (vP - uC) / uK;
+    float r = length(d);
+    float g = exp(-r * r / (uR * uR)) * uI + exp(-r * 4.0 / uR) * uI * 0.2;
+    gl_FragColor = vec4(uCol * g, 1.0);
+  }`;
+const STAR_VS = `
+  attribute vec3 aS; uniform float uTime, uPR, uFade; varying float vA;
+  void main() { gl_Position = vec4(aS.xy, 0.0, 1.0); gl_PointSize = (0.8 + aS.z * 1.4) * uPR; vA = (0.2 + 0.25 * sin(uTime * (0.5 + aS.z * 2.0) + aS.z * 90.0)) * uFade; }`;
+const STAR_FS = `precision mediump float; varying float vA; void main() { float d = length(gl_PointCoord - 0.5) * 2.0; gl_FragColor = vec4(0.75, 0.8, 1.0, vA * smoothstep(1.0, 0.3, d)); }`;
+// Final pass. Tile: tile colour + light. See-through: below uThr fully transparent (the window's colour
+// key removes it), above it fully opaque; dim pixels are lifted to uLift so edges read as glow, not
+// as dark outlines, and nothing may ever come out as the key colour (pure red) itself.
+const OUT_FS = `
+  #ifdef GL_FRAGMENT_PRECISION_HIGH
+  precision highp float;
+  #else
+  precision mediump float;
+  #endif
+  varying vec2 vP;
+  uniform sampler2D uTex; uniform float uCut, uThr, uLift; uniform vec3 uBg;
+  uniform float uSph, uSr, uTime, uAwake, uGlass;
+  uniform vec2 uSc, uRes;
+  uniform vec3 uM0, uM1, uM2;
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
+  vec3 noKey(vec3 o) { if (o.r > 0.97 && o.g < 0.03 && o.b < 0.03) o.gb = vec2(0.05); return o; }
+  void main() {
+    if (uSph > 0.5) {
+      // The glass sphere. Outside it: fully see-through. Inside: fully drawn, so everything in it can be
+      // soft. Only the outline itself is a hard edge, and a bright rim line sits right on it.
+      vec2 px = (vP * 0.5 + 0.5) * uRes, cpx = (uSc * 0.5 + 0.5) * uRes;
+      vec2 d = (px - cpx) / uSr;
+      float r = length(d);
+      if (r > 1.0) { gl_FragColor = vec4(0.0); return; }
+      float z = sqrt(max(0.0, 1.0 - r * r));
+      // a ball lens: the middle is seen a touch magnified, the rim squeezed, so nothing is cut off hard
+      vec2 q = d * (0.84 + 0.16 * z);
+      vec3 light = texture2D(uTex, (cpx + q * uSr) / uRes).rgb;
+      float lum = dot(light, vec3(0.299, 0.587, 0.114));
+      light = max(mix(vec3(lum), light, 1.35), 0.0);      // a little richer colour than the bare scene
+      float t = uTime, wake = 0.35 + 0.65 * uAwake;
+      // deep space inside the glass: indigo in the middle, near-black at the rim, her colour in the core
+      vec3 bg = mix(vec3(0.050, 0.070, 0.150), vec3(0.006, 0.008, 0.022), smoothstep(0.0, 1.0, r));
+      bg += uM1 * 0.11 * exp(-r * r * 3.2) * wake;
+      float n = vnoise(q * 2.3 + vec2(t * 0.020, -t * 0.013)) * 0.62 + vnoise(q * 5.1 - vec2(t * 0.031, t * 0.017)) * 0.38;
+      float neb = smoothstep(0.40, 0.95, n) * (1.0 - 0.5 * r);
+      bg += mix(uM0 * 2.2, uM1 * 0.7, 0.4) * neb * (0.12 + 0.10 * uAwake);
+      vec3 col = 1.0 - (1.0 - min(bg, vec3(1.0))) * (1.0 - min(light, vec3(1.0)));   // light 'screens' over the glass
+      // depth: the glass darkens toward its edge, then glows in her colour right at the rim
+      col *= mix(1.0, 0.5, smoothstep(0.55, 1.0, r));
+      col += uM1 * pow(smoothstep(0.80, 1.0, r), 3.0) * (0.30 + 0.25 * uAwake) * uGlass;
+      // gloss: a soft window-light across the top, a small bright glint, a caustic at the bottom
+      vec2 ge = (d - vec2(-0.06, 0.50)) / vec2(0.68, 0.40);
+      float gloss = smoothstep(1.0, 0.72, length(ge)) * smoothstep(0.18, 0.95, d.y);
+      col += vec3(0.92, 0.96, 1.0) * gloss * 0.13 * uGlass;
+      float ang = atan(d.y, d.x);                         // a thin crescent of reflected light, upper left
+      float aa = (ang - 2.20) / 0.42;                     // (not pow(): a negative base is undefined in GLSL)
+      float along = exp(-aa * aa);
+      col += vec3(0.93, 0.97, 1.0) * smoothstep(0.034 * along + 0.002, 0.0, abs(r - 0.885)) * along * 0.55 * uGlass;
+      vec2 cz = (d - vec2(0.0, -0.80)) / vec2(0.42, 0.10);
+      col += mix(uM1, uM2, 0.35) * exp(-dot(cz, cz) * 2.0) * (0.16 + 0.20 * uAwake) * uGlass;
+      col = col / (1.0 + 0.18 * max(col - 0.85, 0.0));    // (only the brightest overlaps are eased)
+      col = min(col, vec3(1.0));
+      // the rim line: about 1.5 screen pixels, smooth on its inner side
+      float px1 = 1.0 / uSr;
+      float rim = smoothstep(1.0 - 2.8 * px1, 1.0 - 1.4 * px1, r);
+      col = mix(col, mix(uM1, vec3(1.0), 0.45) * (0.80 + 0.20 * uAwake), rim * uGlass);
+      gl_FragColor = vec4(noKey(col), 1.0);
+      return;
+    }
+    vec3 c = texture2D(uTex, vP * 0.5 + 0.5).rgb;
+    if (uCut < 0.5) { gl_FragColor = vec4(min(uBg + c, vec3(1.0)), 1.0); return; }
+    float m = max(c.r, max(c.g, c.b));
+    if (m < uThr) { gl_FragColor = vec4(0.0); return; }
+    vec3 o = min(c * (max(m, uLift) / m), vec3(1.0));
+    gl_FragColor = vec4(noKey(o), 1.0);
+  }`;
+
+let prog, fadeProg, glowProg, starProg, outProg;
+try {
+  prog = program(VS, FS); fadeProg = program(QUAD_VS, FADE_FS); glowProg = program(QUAD_VS, GLOW_FS);
+  starProg = program(STAR_VS, STAR_FS); outProg = program(QUAD_VS, OUT_FS);
+} catch (e) {
+  if (gl.isContextLost()) { setTimeout(() => location.reload(), 2000); return; }
+  console.error('[orb] shader setup failed', e);
+  document.getElementById('nogl').style.display = 'grid';
+  return;
+}
+const outBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, outBuf); gl.bufferData(gl.ARRAY_BUFFER, OUT, gl.DYNAMIC_DRAW);
+const seedBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, seedBuf); gl.bufferData(gl.ARRAY_BUFFER, SEED, gl.STATIC_DRAW);
+const quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const STARS = OPAQUE || SPHERE ? 260 : 0, starData = new Float32Array(Math.max(1, STARS) * 3);
+for (let i = 0; i < STARS; i++) { starData[i * 3] = Math.random() * 2 - 1; starData[i * 3 + 1] = Math.random() * 2 - 1; starData[i * 3 + 2] = Math.random(); }
+const starBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, starBuf); gl.bufferData(gl.ARRAY_BUFFER, starData, gl.STATIC_DRAW);
+const loc = (p, names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
+const U = loc(prog, ['uTime', 'uWake', 'uLevel', 'uBeat', 'uPR', 'uFade', 'uYaw', 'uPitch', 'uSize', 'uAlpha', 'uK', 'uOffY', 'uC0', 'uC1', 'uC2', 'uCenter', 'uRingC', 'uRingR', 'uRingA', 'uUni']);
+const FU = loc(fadeProg, ['uCol']), GU = loc(glowProg, ['uC', 'uK', 'uI', 'uR', 'uCol']), SU = loc(starProg, ['uTime', 'uPR', 'uFade']);
+const OU = loc(outProg, ['uTex', 'uCut', 'uThr', 'uLift', 'uBg', 'uSph', 'uSr', 'uTime', 'uAwake', 'uGlass', 'uSc', 'uRes', 'uM0', 'uM1', 'uM2']);
+const aP = gl.getAttribLocation(prog, 'aP'), aB = gl.getAttribLocation(prog, 'aB'), aR = gl.getAttribLocation(prog, 'aR');
+const aQ1 = gl.getAttribLocation(fadeProg, 'aPos'), aQ2 = gl.getAttribLocation(glowProg, 'aPos'), aQ3 = gl.getAttribLocation(outProg, 'aPos'), aS = gl.getAttribLocation(starProg, 'aS');
+const ringC = new Float32Array(12), ringR = new Float32Array(4), ringA = new Float32Array(4);
+const view = { yaw: 0, pitch: 0 };
+const look = {                       // bare see-through particles: a little brighter, no soft glow disc
+  thr: 0.09, lift: 0.6, size: OPAQUE || SPHERE ? 1 : 1.12, alpha: OPAQUE || SPHERE ? 1 : 1.18,
+  sphereWorld: 1.22,                 // world units that fit inside the glass (the orb is 0.5, her rings ~1)
+  glass: 1,                          // strength of the glass reflections / rim (0 = none)
+};
+const sphere = { cx: 0, cy: 0, r: 0 };   // where the glass is this frame (NDC centre, radius in pixels)
+let trails = true, lastFade = 1;
+
+// off-screen scene texture
+const sceneTex = gl.createTexture(), sceneFbo = gl.createFramebuffer();
+let fboW = 0, fboH = 0;
+function fit() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  if (fboW !== w || fboH !== h) {
+    fboW = w; fboH = h;
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+    gl.viewport(0, 0, w, h); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  return dpr;
+}
+function quad(attr) { gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf); gl.enableVertexAttribArray(attr); gl.vertexAttribPointer(attr, 2, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(attr); }
+
+// World units -> screen: x in [-1, 1] and y in [-4/3, 4/3] always fit (the 3:4 frame the forms were
+// designed in); a wider or taller window just gets more room around them.
+// `cardsFrac` of the window's height at the bottom is taken by the cards (layout.frac): the orb and its
+// shapes fit the rest, centred in it.
+function frameScale(W, H, frac = 0, dpr = 1) {
+  const Hr = H * (1 - frac);
+  if (SPHERE) {
+    // The glass fills the space above the cards (a small margin all round); her world is scaled so
+    // `look.sphereWorld` units reach its rim.
+    const r = Math.max(8, Math.min(W / 2, Hr / 2) - 6 * dpr);
+    sphere.cx = 0; sphere.cy = frac; sphere.r = r;
+    const unitPx = r / look.sphereWorld;
+    return [unitPx / (W / 2), unitPx / (H / 2), frac];
+  }
+  const kx = Math.min(1, 0.75 * Hr / W);
+  return [kx, kx * W / H, frac];
+}
+
+function draw(dt, S) {
+  const dpr = fit(), W = canvas.width, H = canvas.height, K = frameScale(W, H, layout.frac, dpr);
+  const fade = trails ? 1 - Math.exp(-22 * Math.max(dt, 1 / 240)) : 1;
+  lastFade = fade;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+  gl.viewport(0, 0, W, H);
+  gl.enable(gl.BLEND);
+  // 1. fade the previous frame toward black (motion trails)
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.useProgram(fadeProg); gl.uniform4f(FU.uCol, 0, 0, 0, fade); quad(aQ1);
+  // 2. additive light
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  if (STARS) {
+    gl.useProgram(starProg);
+    gl.uniform1f(SU.uTime, sim.time); gl.uniform1f(SU.uPR, dpr); gl.uniform1f(SU.uFade, fade * (0.35 + 0.65 * S.awake));
+    gl.bindBuffer(gl.ARRAY_BUFFER, starBuf); gl.enableVertexAttribArray(aS); gl.vertexAttribPointer(aS, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.POINTS, 0, STARS); gl.disableVertexAttribArray(aS);
+  }
+  const f = trans.to, cen = mix3(trans.fromCenter, f.center, smooth(0, 1, trans.p));
+  if (OPAQUE || SPHERE) {
+    const persp = 3.4 / (3.4 - cen[2]);
+    gl.useProgram(glowProg);
+    gl.uniform2f(GU.uC, cen[0] * persp * K[0], cen[1] * persp * K[1] + K[2]); gl.uniform2f(GU.uK, K[0], K[1]);
+    gl.uniform1f(GU.uI, (f.glow + (f.glowBoost || 0) + 0.25 * S.level + 0.2 * S.beat) * (0.35 + 0.65 * S.awake) * fade);
+    gl.uniform1f(GU.uR, 0.55); gl.uniform3fv(GU.uCol, palette[1]);
+    quad(aQ2);
+  }
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, OUT);
+  gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 4, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(aB); gl.vertexAttribPointer(aB, 1, gl.FLOAT, false, 20, 16);
+  gl.bindBuffer(gl.ARRAY_BUFFER, seedBuf); gl.enableVertexAttribArray(aR); gl.vertexAttribPointer(aR, 4, gl.FLOAT, false, 0, 0);
+  for (let i = 0; i < 4; i++) {
+    const r = sim.rings[i];
+    ringR[i] = r ? r.r : 9; ringA[i] = r ? r.a : 0;
+    ringC[i * 3] = r ? r.c[0] : 0; ringC[i * 3 + 1] = r ? r.c[1] : 0; ringC[i * 3 + 2] = r ? r.c[2] : 0;
+  }
+  gl.uniform1f(U.uTime, sim.time); gl.uniform1f(U.uWake, S.awake); gl.uniform1f(U.uLevel, S.level); gl.uniform1f(U.uBeat, S.beat);
+  gl.uniform1f(U.uPR, dpr); gl.uniform1f(U.uFade, fade); gl.uniform1f(U.uYaw, view.yaw); gl.uniform1f(U.uPitch, view.pitch);
+  gl.uniform1f(U.uSize, look.size); gl.uniform1f(U.uAlpha, look.alpha); gl.uniform2f(U.uK, K[0], K[1]); gl.uniform1f(U.uOffY, K[2]);
+  gl.uniform3fv(U.uC0, palette[0]); gl.uniform3fv(U.uC1, palette[1]); gl.uniform3fv(U.uC2, palette[2]);
+  gl.uniform3fv(U.uUni, uniRgb);
+  gl.uniform3fv(U.uCenter, cen);
+  gl.uniform3fv(U.uRingC, ringC); gl.uniform1fv(U.uRingR, ringR); gl.uniform1fv(U.uRingA, ringA);
+  gl.drawArrays(gl.POINTS, 0, N);
+  gl.disableVertexAttribArray(aP); gl.disableVertexAttribArray(aB); gl.disableVertexAttribArray(aR);
+  // 3. to the window
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.BLEND);
+  gl.useProgram(outProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+  gl.uniform1i(OU.uTex, 0); gl.uniform1f(OU.uCut, OPAQUE ? 0 : 1); gl.uniform1f(OU.uThr, look.thr); gl.uniform1f(OU.uLift, look.lift);
+  gl.uniform3fv(OU.uBg, BG_RGB);
+  gl.uniform1f(OU.uSph, SPHERE ? 1 : 0);
+  gl.uniform2f(OU.uSc, sphere.cx, sphere.cy); gl.uniform1f(OU.uSr, sphere.r || 1); gl.uniform2f(OU.uRes, W, H);
+  gl.uniform1f(OU.uTime, sim.time); gl.uniform1f(OU.uAwake, S.awake); gl.uniform1f(OU.uGlass, look.glass);
+  gl.uniform3fv(OU.uM0, palette[0]); gl.uniform3fv(OU.uM1, palette[1]); gl.uniform3fv(OU.uM2, palette[2]);
+  quad(aQ3);
+}
+
+// ================================================================ mini cards under the orb (cards.py / quiet_mode.py)
+const CARD_H = { status: 28, timer: 48, music: 64, weather: 64, note: 64, hold: 44 };
+const CARD_ORDER = { hold: -1, note: 0, timer: 1, music: 2, weather: 3, status: 4 };
+const MAX_CARDS = 4;
+const cardsEl = document.getElementById('cards');
+if (OPAQUE) document.body.classList.add('tile');
+const cardMap = new Map();                 // id -> { data, el, parts }
+const layout = { frac: 0, target: 0 };
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const mmss = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+
+function renderCard(c) {
+  const d = c.data, k = d.kind;
+  c.el.className = 'card ' + k + (d.done ? ' done' : '');
+  if (k === 'timer') {
+    c.el.innerHTML = `<span class="ic">${d.done ? '✅' : '⏱️'}</span><div class="main"><div class="t1">${esc(d.done ? (d.title + ' — done') : d.title)}</div></div><span class="big"></span><div class="bar"><i></i></div>`;
+  } else if (k === 'music') {
+    const art = d.art ? `<img alt="" src="${esc(d.art)}">` : '<span class="ic">🎵</span>';
+    c.el.innerHTML = `${art}<div class="main"><div class="t1">${esc(d.title)}</div><div class="t2">${esc(d.artist)}</div></div><span class="ic">${d.playing ? '▶️' : '⏸️'}</span><div class="bar"><i></i></div>`;
+  } else if (k === 'weather') {
+    const bits = [d.hi != null ? `H ${d.hi}°` : '', d.lo != null ? `L ${d.lo}°` : '', d.rain != null ? `${d.rain}% rain` : ''].filter(Boolean).join(' · ');
+    const cond = String(d.cond || ''), cap = cond.charAt(0).toUpperCase() + cond.slice(1);
+    c.el.innerHTML = `<span class="ic" style="font-size:28px;width:32px">${esc(d.icon || '🌡️')}</span><span class="big">${d.temp != null ? esc(d.temp) + '°' : ''}</span><div class="main"><div class="t1">${esc(cap)}${d.place ? ' · ' + esc(d.place) : ''}</div><div class="t2">${esc(bits)}</div></div>`;
+  } else if (k === 'hold') {                // a gesture being held (gestures.py): the bar fills, drop your hand to cancel
+    c.el.innerHTML = `<span class="ic">${esc(d.icon || '✋')}</span><div class="main"><div class="t1">${esc(d.text || '')}</div></div><div class="bar"><i></i></div>`;
+  } else if (k === 'note') {
+    c.el.innerHTML = `<span class="ic">${esc(d.icon || '🔔')}</span><div class="main"><div class="t1">${esc(d.title || 'Raziel')}</div><div class="t2">${esc(d.text || '')}</div></div>`;
+  } else {
+    c.el.innerHTML = `<span class="ic">${esc(d.icon || '•')}</span><div class="main"><div class="t1" style="font-weight:500">${esc(d.text || '')}</div></div>`;
+  }
+  c.big = c.el.querySelector('.big'); c.bar = c.el.querySelector('.bar i'); c.lastText = null;
+  c.accent = accentOf(d);
+}
+
+// ---------------------------------------------------------------- the glass pills behind the cards
+// One canvas at screen resolution. Each pill: a dark glass gradient, a glow of the card's accent colour
+// behind its icon, a hairline highlight along the top and a fine border. In the see-through window the
+// finished pixels are snapped to fully drawn / fully clear, so the rounded outline never blends.
+const cardBg = document.getElementById('cardbg');
+const ACCENTS = { weather: [255, 190, 84], music: [30, 215, 96], timer: [96, 200, 255], note: [178, 140, 255],
+                  status: [140, 164, 230], hold: [120, 214, 255], done: [110, 220, 110] };
+const RAIN_ICONS = /[🌧⛈🌦🌨❄☔]/u;
+function accentOf(d) {
+  if (d.done) return ACCENTS.done;
+  if (d.kind === 'weather' && RAIN_ICONS.test(String(d.icon || ''))) return [110, 170, 255];
+  return ACCENTS[d.kind] || ACCENTS.status;
+}
+function pillPath(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y); g.lineTo(x + w - r, y); g.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
+  g.lineTo(x + w, y + h - r); g.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+  g.lineTo(x + r, y + h); g.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
+  g.lineTo(x, y + r); g.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5); g.closePath();
+}
+function paintCards() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(1, Math.round(innerWidth * dpr)), H = Math.max(1, Math.round(innerHeight * dpr));
+  if (cardBg.width !== W || cardBg.height !== H) { cardBg.width = W; cardBg.height = H; }
+  const g = cardBg.getContext('2d', { willReadFrequently: true });
+  g.clearRect(0, 0, W, H);
+  let x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (const c of cardMap.values()) {
+    if (c.el.style.display === 'none' || !c.el.style.width) continue;
+    const x = Math.round(parseFloat(c.el.style.left) * dpr), y = Math.round(parseFloat(c.el.style.top) * dpr);
+    const w = Math.round(parseFloat(c.el.style.width) * dpr), h = Math.round(parseFloat(c.el.style.height) * dpr);
+    const r = Math.min(h / 2, 16 * dpr), [ar, ag, ab] = c.accent || ACCENTS.status;
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
+    g.save();
+    pillPath(g, x, y, w, h, r);
+    const fill = g.createLinearGradient(0, y, 0, y + h);
+    fill.addColorStop(0, '#1b2743'); fill.addColorStop(0.55, '#121a30'); fill.addColorStop(1, '#0c1224');
+    g.fillStyle = fill; g.fill();
+    g.clip();
+    const gx = x + Math.min(34 * dpr, h * 0.7), gy = y + h / 2;
+    const glow = g.createRadialGradient(gx, gy, 0, gx, gy, Math.max(h, 70 * dpr));
+    glow.addColorStop(0, `rgba(${ar},${ag},${ab},0.26)`); glow.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
+    g.fillStyle = glow; g.fillRect(x, y, w, h);
+    const sheen = g.createLinearGradient(0, y, 0, y + h * 0.5);         // glass: lighter near the top
+    sheen.addColorStop(0, 'rgba(255,255,255,0.07)'); sheen.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = sheen; g.fillRect(x, y, w, h * 0.5);
+    g.restore();
+    g.save();                                                              // fine border, brighter on top
+    pillPath(g, x + 0.5, y + 0.5, w - 1, h - 1, Math.max(1, r - 0.5));
+    const edge = g.createLinearGradient(0, y, 0, y + h);
+    edge.addColorStop(0, `rgba(${Math.round(ar * 0.35 + 150)},${Math.round(ag * 0.35 + 165)},${Math.round(ab * 0.35 + 200)},0.55)`);
+    edge.addColorStop(1, 'rgba(70,90,140,0.45)');
+    g.strokeStyle = edge; g.lineWidth = Math.max(1, Math.round(dpr)); g.stroke();
+    g.restore();
+  }
+  if (!OPAQUE && x1 > x0) {                  // see-through: snap every pixel to fully drawn or fully clear
+    const bx = Math.max(0, x0 - 2), by = Math.max(0, y0 - 2), bw = Math.min(W, x1 + 2) - bx, bh = Math.min(H, y1 + 2) - by;
+    const img = g.getImageData(bx, by, bw, bh), px = img.data;
+    for (let i = 3; i < px.length; i += 4) px[i] = px[i] >= 128 ? 255 : 0;
+    g.putImageData(img, bx, by);
+  }
+}
+
+function upsertCard(d) {
+  if (!d || typeof d !== 'object' || !d.id || !CARD_H[d.kind]) return;
+  let c = cardMap.get(d.id);
+  if (!c) { c = { el: document.createElement('div'), born: performance.now() }; cardsEl.appendChild(c.el); cardMap.set(d.id, c); }
+  if (d.ttl && !d.until) d.until = Date.now() + d.ttl * 1000;     // (avatar_server.py sets "until" itself)
+  c.data = d;
+  renderCard(c);
+  layoutCards();
+}
+function removeCard(id) {
+  const c = cardMap.get(id);
+  if (!c) return;
+  c.el.remove(); cardMap.delete(id);
+  layoutCards();
+}
+
+// Bottom-up stack, newest pop-ups first. Everything is a multiple of 4 CSS px.
+function layoutCards() {
+  const q4 = v => Math.floor(v / 4) * 4;
+  const W = q4(innerWidth - 16);
+  const list = [...cardMap.values()].sort((a, b) => (CARD_ORDER[a.data.kind] - CARD_ORDER[b.data.kind]) || (b.born - a.born));
+  let y = q4(innerHeight) - 8, used = 0;
+  list.forEach((c, i) => {
+    if (i >= MAX_CARDS) { c.el.style.display = 'none'; return; }
+    const h = CARD_H[c.data.kind];
+    y -= h;
+    Object.assign(c.el.style, { display: 'flex', left: '8px', top: y + 'px', width: W + 'px', height: h + 'px' });
+    y -= 8; used += h + 8;
+  });
+  layout.target = used ? Math.min(0.55, (used + 8) / Math.max(1, innerHeight)) : 0;
+  paintCards();
+}
+addEventListener('resize', layoutCards);
+
+// Live parts: countdowns, song progress, expiry. Text is only touched when it changes.
+function updateCards(dt) {
+  layout.frac = approach(layout.frac, layout.target, 5, dt);
+  if (Math.abs(layout.frac - layout.target) < 1e-3) layout.frac = layout.target;
+  if (!cardMap.size) return;
+  const now = Date.now();
+  for (const [id, c] of cardMap) {
+    const d = c.data;
+    if (d.until && now > d.until) { removeCard(id); continue; }
+    if (d.kind === 'timer') {
+      const left = d.done ? 0 : Math.max(0, (d.due - now) / 1000);
+      const text = mmss(left);
+      if (text !== c.lastText) { c.big.textContent = text; c.lastText = text; }
+      if (c.bar) c.bar.style.width = (100 * (1 - left / Math.max(1, d.total))).toFixed(1) + '%';
+    } else if (d.kind === 'hold' && c.bar) {
+      const f = d.total > 0 ? clamp((now - (d.start || now)) / (d.total * 1000), 0, 1) : 0;
+      c.bar.style.width = (100 * f).toFixed(1) + '%';
+    } else if (d.kind === 'music' && c.bar) {
+      const pos = d.duration ? Math.min(d.duration, d.progress + (d.playing ? now - d.at : 0)) : 0;
+      c.bar.style.width = d.duration ? (100 * pos / d.duration).toFixed(1) + '%' : '0%';
+    }
+  }
+}
+
+// ================================================================ the universe's names and symbols (on top of the particles)
+// Text can't be particles: a 2D canvas over the scene, drawn only where the glass (or the dark tile) is
+// fully drawn - in the see-through window a soft text edge over a see-through pixel would show the key
+// colour, so everything is clipped to the inside of the sphere.
+const lab = document.getElementById('ulabels');
+const LABEL_FONT = '"Bahnschrift", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif';
+const GLYPH_FONT = '"Yu Gothic UI", "Yu Gothic", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK JP", "Noto Sans CJK SC", sans-serif';
+let labAlpha = 0, labWasDrawn = false;
+
+// world (a form's output) -> window pixels, exactly as the vertex shader and the glass lens place it
+function toScreen(p, K, W, H) {
+  const persp = 3.4 / (3.4 - p[2]);
+  const nx = p[0] * persp * K[0], ny = p[1] * persp * K[1] + K[2];
+  let sx = (nx * 0.5 + 0.5) * W, sy = (ny * 0.5 + 0.5) * H;          // (y up, like the GL pixels)
+  if (SPHERE) {
+    const cx = (sphere.cx * 0.5 + 0.5) * W, cy = (sphere.cy * 0.5 + 0.5) * H, r = sphere.r || 1;
+    const qx = (sx - cx) / r, qy = (sy - cy) / r, qs = Math.hypot(qx, qy);
+    if (qs >= 0.84) return null;                                      // outside what the glass shows
+    let lo = 0, hi = 1;                                               // the lens: |d| (0.84 + 0.16 sqrt(1 - d^2)) = |q|
+    for (let it = 0; it < 14; it++) { const m = (lo + hi) / 2; if (m * (0.84 + 0.16 * Math.sqrt(1 - m * m)) < qs) lo = m; else hi = m; }
+    const k = qs > 1e-6 ? lo / qs : 1;
+    sx = cx + qx * k * r; sy = cy + qy * k * r;
+  }
+  return [sx, H - sy, persp];
+}
+function spaced(g, text, x, y, spacing) {                              // letter-spaced, centred
+  if ('letterSpacing' in g) { g.letterSpacing = spacing + 'px'; g.fillText(text, x + spacing / 2, y); g.letterSpacing = '0px'; return; }
+  const chars = [...text], widths = chars.map(ch => g.measureText(ch).width);
+  let w = widths.reduce((a, b) => a + b, 0) + spacing * (chars.length - 1), cx = x - w / 2;
+  const align = g.textAlign; g.textAlign = 'left';
+  chars.forEach((ch, i) => { g.fillText(ch, cx, y); cx += widths[i] + spacing; });
+  g.textAlign = align;
+}
+function rgba(hex, a) { const c = hexRgb(hex); return `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`; }
+
+function drawEmblem(g, x, y, R, b, a) {
+  g.save();
+  g.globalAlpha = a;
+  g.strokeStyle = rgba(b.color, 0.9); g.shadowColor = b.color; g.shadowBlur = R * 0.25;
+  g.lineWidth = Math.max(1, R * 0.03);
+  g.beginPath(); g.arc(x, y, R, 0, TAU); g.stroke();
+  for (let i = 0; i < 48; i++) {                                     // the dial's ticks
+    const an = i / 48 * TAU - Math.PI / 2 + sim.time * 0.05, long = i % 6 === 0;
+    const r0 = R * 1.1, r1 = R * (long ? 1.26 : 1.17);
+    g.globalAlpha = a * (long ? 0.9 : 0.45);
+    g.beginPath(); g.moveTo(x + Math.cos(an) * r0, y + Math.sin(an) * r0); g.lineTo(x + Math.cos(an) * r1, y + Math.sin(an) * r1); g.stroke();
+  }
+  g.globalAlpha = a;
+  g.fillStyle = rgba(b.color, 1); g.shadowBlur = R * 0.35;
+  g.font = `300 ${Math.round(R * 1.18)}px ${GLYPH_FONT}`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(b.glyph || '', x, y + R * 0.04);
+  g.restore();
+}
+
+function stepLabels(dt) {
+  labAlpha = approach(labAlpha, trans.to.id === 'universe' && trans.p > 0.55 ? 1 : 0, 4, dt);
+  if (labAlpha < 0.005) labAlpha = 0;
+}
+function drawLabels() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = canvas.width, H = canvas.height;
+  if (lab.width !== W || lab.height !== H) { lab.width = W; lab.height = H; }
+  const g = lab.getContext('2d');
+  if (labAlpha < 0.01 || !(SPHERE || OPAQUE) || !forms.universe.ready) {
+    if (labWasDrawn) { g.clearRect(0, 0, W, H); labWasDrawn = false; }
+    return;
+  }
+  labWasDrawn = true;
+  g.clearRect(0, 0, W, H);
+  const K = frameScale(W, H, layout.frac, dpr), U = forms.universe, an = U.anchors;
+  const R = SPHERE ? sphere.r : Math.min(W, H) * 0.45;
+  const cx = SPHERE ? (sphere.cx * 0.5 + 0.5) * W : W / 2, cy = SPHERE ? H - (sphere.cy * 0.5 + 0.5) * H : H / 2;
+  g.save();
+  if (SPHERE) { g.beginPath(); g.arc(cx, cy, Math.max(1, R - 3 * dpr), 0, TAU); g.clip(); }
+  const A = labAlpha * (0.45 + 0.55 * sim.awake), F = an.F || 0;
+  const px = s => Math.max(7 * dpr, Math.round(R * s));
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  // --- the whole universe: each galaxy's name and title, the Nexus in the middle
+  const over = A * (1 - smooth(0.15, 0.6, F));
+  if (over > 0.01) {
+    const all = [[an.nexus, UNI.nexus, 0.1]].concat(UNI.beings.map((b, q) => [an.gal[q], b, 0.07]));
+    const roomy = R >= 330 * dpr;                                     // big enough for the small titles too
+    for (const [p, b, off] of all) {
+      if (!b || !p) continue;
+      const s = toScreen(p, K, W, H);
+      if (!s) continue;
+      const y = s[1] + R * off * (an.zoom || 1) * s[2];
+      g.globalAlpha = over;
+      g.font = `600 ${px(b.key === 'nexus' ? 0.066 : 0.058)}px ${LABEL_FONT}`;
+      g.fillStyle = rgba(b.color, 1); g.shadowColor = b.color; g.shadowBlur = R * 0.03;
+      spaced(g, b.name.toUpperCase(), s[0], y, px(0.004));
+      if (roomy || b.key === 'nexus') {
+        g.shadowBlur = 0; g.globalAlpha = over * 0.75;
+        g.font = `500 ${px(roomy ? 0.03 : 0.036)}px ${LABEL_FONT}`; g.fillStyle = '#aeb8d8';
+        spaced(g, (b.title || '').toUpperCase(), s[0], y + px(b.key === 'nexus' ? 0.075 : 0.066), px(0.004));
+      }
+    }
+  }
+  // --- flown into one galaxy: its symbol, its name, its helpers
+  const q = an.shown, b = q >= 0 && q < 6 ? UNI.beings[q] : null;
+  const inA = A * smooth(0.45, 0.95, F);
+  if (b && inA > 0.01) {
+    const ey = cy - R * 0.62, eR = R * 0.16;
+    drawEmblem(g, cx, ey, eR, b, inA);
+    g.globalAlpha = inA; g.textBaseline = 'top';
+    g.font = `600 ${px(0.075)}px ${LABEL_FONT}`; g.fillStyle = rgba(b.color, 1); g.shadowColor = b.color; g.shadowBlur = R * 0.04;
+    spaced(g, b.name.toUpperCase(), cx, ey + eR * 1.45, px(0.014));
+    g.shadowBlur = 0; g.globalAlpha = inA * 0.8; g.fillStyle = '#b8c2e0';
+    g.font = `500 ${px(0.032)}px ${LABEL_FONT}`;
+    spaced(g, b.title.toUpperCase(), cx, ey + eR * 1.45 + px(0.092), px(0.005));
+    g.font = `500 ${px(0.042)}px ${LABEL_FONT}`; g.textBaseline = 'top';
+    b.helpers.forEach((name, h) => {
+      const p = an.helpCam && an.helpCam[q * 6 + h];
+      if (!p) return;
+      const s = toScreen(p, K, W, H);
+      if (!s) return;
+      g.globalAlpha = inA * 0.95; g.fillStyle = '#e8eeff'; g.shadowColor = b.color; g.shadowBlur = R * 0.02;
+      g.fillText(name, s[0], s[1] + px(0.03));
+    });
+  }
+  g.restore();
+}
+
+// ================================================================ forms and actions asked for by voice (avatar_forms.py)
+const FORM_IDS = ['orb', 'dragon', 'sword', 'knight', 'butterfly', 'planet', 'heart', 'galaxy', 'universe'];
+const MUSIC_FORMS = ['pulse', 'eqring', 'waves'];
+// which form performs which action
+const ACTION_FORM = { roar: 'dragon', fire: 'dragon', fly: 'dragon', stay: 'dragon', swing: 'sword', attack: 'knight', block: 'knight', raise: 'knight' };
+let actQueue = [], lastActAt = -9;   // actions waiting for their form to assemble / for the previous one
+let musicMode = false, musicForm = null, musicFormSince = 0, musicHold = false, formBeforeMusic = 'orb';
+
+function askForm(id, replay) {
+  if (!FORM_IDS.includes(id)) return false;
+  if (replay) {                                   // catching up after a reconnect: not a new request
+    if (musicMode) { formBeforeMusic = id; return true; }
+    if (trans.to.id === id) return true;
+  }
+  if (music.active) musicHold = true;             // she keeps the beat in whatever you asked for
+  if (id === 'dragon' && trans.to.id !== 'dragon' && forms.dragon.ready) forms.dragon.flyTarget = 0;
+  actQueue = [];
+  formBeforeMusic = id;
+  setForm(id);
+  return true;
+}
+function askAction(name) {
+  let form = ACTION_FORM[name];
+  if (!form) return false;
+  const target = actQueue.length ? actQueue[actQueue.length - 1].form : trans.to.id;
+  // "attack" as a sword is a swing; "swing" as a knight is an attack
+  if (name === 'attack' && target === 'sword') { form = 'sword'; name = 'swing'; }
+  else if (name === 'swing' && target === 'knight') { form = 'knight'; name = 'attack'; }
+  if (music.active) musicHold = true;
+  formBeforeMusic = form;
+  if (trans.to.id !== form) { setForm(form); actQueue = actQueue.filter(a => a.form === form); }
+  const assembled = sim.time + Math.max(0, (0.8 - trans.p) * 1.9);
+  const prev = actQueue.length ? actQueue[actQueue.length - 1].at : lastActAt;
+  const at = Math.max(assembled, prev + 1.3);       // "roar and breathe fire": one after the other
+  if (at <= sim.time) { ensure(forms[form]).act(name); lastActAt = sim.time; }
+  else actQueue.push({ form, name, at });
+  return true;
+}
+function runPending() {
+  while (actQueue.length && sim.time >= actQueue[0].at) {
+    const a = actQueue.shift();
+    if (trans.to.id === a.form) { forms[a.form].act(a.name); lastActAt = sim.time; }
+  }
+}
+function directMusic() {
+  if (!music.active) {
+    if (musicMode) {
+      musicMode = false; musicForm = null;
+      if (MUSIC_FORMS.includes(trans.to.id)) setForm(FORM_IDS.includes(formBeforeMusic) ? formBeforeMusic : 'orb');
+    }
+    musicHold = false;
+    return;
+  }
+  if (!musicMode) {
+    musicMode = true; musicFormSince = -99;
+    if (!MUSIC_FORMS.includes(trans.to.id)) formBeforeMusic = trans.to.id;
+  }
+  if (musicHold) return;
+  const e = music.intensity;
+  let want = e > 0.4 ? 'pulse' : e > 0.22 ? 'eqring' : 'waves';     // hard -> spiky pulse, medium -> ring, calm -> waves
+  if (musicForm && musicForm !== want && sim.time - musicFormSince < 6) want = musicForm;
+  if (want !== musicForm || trans.to.id !== want) { musicForm = want; musicFormSince = sim.time; setForm(want); }
+}
+
+// ================================================================ messages from avatar_server.py
+function handle(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  const type = msg.type || (msg.viseme ? 'viseme' : msg.state ? 'state' : msg.emotion ? 'emotion' : null);
+  switch (type) {
+    case 'state': setRawState(msg.state || msg.value); break;
+    case 'speech_start': setRawState('speaking'); break;
+    case 'speech_end': setRawState(msg.next || 'idle'); voice.tl = []; break;
+    case 'emotion': setMood(msg.emotion || msg.name || msg.value, msg.intensity); break;
+    case 'visemes': setTimeline(msg.sequence || msg.visemes || []); break;
+    case 'viseme': {
+      const d = +(msg.duration ?? msg.d ?? 0.09);
+      const rel = sim.time - voice.t0;
+      if (!voice.tl.length || rel > voice.end + 0.25) setTimeline([{ v: msg.viseme || msg.value, t: 0, d, w: msg.weight ?? 1 }]);
+      else { voice.tl.push({ t: rel, d: clamp(d, 0.03, 0.6), p: (VOWEL_OPEN[msg.viseme || msg.value] || 0.6) * clamp(+(msg.weight ?? 1) || 1, 0, 1.4) }); voice.end = Math.max(voice.end, rel + d); }
+      break;
+    }
+    case 'level': voice.ext = Math.max(voice.ext, clamp(+(msg.value ?? 0) || 0, 0, 1)); break;
+    case 'form': askForm(String(msg.name || msg.form || msg.value || '').toLowerCase(), !!msg.replay); break;
+    case 'action': askAction(String(msg.name || msg.action || msg.value || '').toLowerCase()); break;
+    case 'music': onMusic(msg); break;
+    case 'universe': onUniverse(msg); break;
+    case 'card': upsertCard(msg.card); break;
+    case 'card_remove': removeCard(String(msg.id || '')); break;
+    case 'cards_clear': [...cardMap.keys()].forEach(removeCard); break;
+    case 'dance':                                         // "dance" / "stop dancing"
+      music.react = msg.on !== false;
+      if (music.react) { musicHold = false; }
+      else { music.on = false; music.bytes.fill(0); }
+      break;
+    case 'gesture':                                       // initiative.py's little idle gestures -> a soft ripple
+      if (sim.awake > 0.5 && trans.to.id === 'orb' && sim.time - sim.lastRing > 1) { sim.lastRing = sim.time; addRing(trans.to.focus, 0.35); }
+      break;
+    default: break;                                       // blink / framing / config: nothing to do for an orb
+  }
+}
+
+// ================================================================ main loop
+const S = { level: 0, user: 0, think: 0, awake: 0, beat: 0, music: 0, bandAt };
+function tick(dt) {
+  sim.time += dt;
+  if (sim.raw === 'idle' && sim.state !== 'asleep' && sim.time >= sim.sleepAt) sim.state = 'asleep';
+  // emotions fade back to her own colour a while after she has finished talking
+  if (sim.mood !== 'neutral' && sim.state !== 'speaking' && sim.time - sim.moodAt > 8) { sim.mood = 'neutral'; sim.moodK = 1; }
+
+  stepVoice(dt, peak => {
+    if (peak > 0.62 && sim.time - sim.lastRing > 0.3 && trans.to.id === 'orb') { sim.lastRing = sim.time; addRing(trans.to.focus, peak * 0.8); }
+  });
+  sim.rings.forEach(r => { r.r += dt * 1.1 * MOTION; r.a *= Math.exp(-dt * 1.1); });
+  sim.rings = sim.rings.filter(r => r.r < 2.8 && r.a > 0.02);
+
+  analyseMusic(dt);
+  directMusic();
+  runPending();
+
+  const awakeTarget = Math.max(sim.state === 'asleep' ? 0 : 1, music.active ? 0.85 : 0);   // she dances even while asleep
+  sim.awake = approach(sim.awake, awakeTarget, 1.8, dt);
+  sim.think = approach(sim.think, sim.state === 'thinking' ? 1 : 0, 3.2, dt);
+  S.level = voice.level; S.think = sim.think; S.awake = sim.awake;
+  S.user = sim.state === 'listening' ? 0.16 + 0.1 * Math.sin(sim.time * 1.7) : 0;         // a quiet attentive shimmer
+  S.beat = music.beat * (musicMode || music.active ? 1 : 0);
+  S.music = music.active ? 1 : 0;
+
+  // palette: the form's colours, tinted by her mood (fully, for the orb), by thinking and by sleep
+  const f = trans.to, mood = mix3(MOODS.neutral, MOODS[sim.mood], sim.moodK);
+  const moodPal = [mood.map(v => v * 0.28 + 0.02), mood, mix3(mood, [1, 1, 1], 0.62)];
+  for (let k = 0; k < 3; k++) {
+    let target = mix3(f.palette[k], moodPal[k], f.moodWeight);
+    target = mix3(target, k === 0 ? THINK_RGB.map(v => v * 0.3) : THINK_RGB, 0.55 * sim.think * (f.id === 'orb' ? 1 : 0.4));
+    if (sim.state === 'asleep' && !music.active) target = mix3(target, [0.45, 0.52, 0.85].map(v => v * (k === 0 ? 0.3 : 1)), 0.45);
+    palette[k] = mix3(palette[k], target, 1 - Math.exp(-3 * dt));
+  }
+  compose(sim.time, dt, S);
+}
+
+// Asleep and quiet she only needs ~24 frames a second (most of the day: saves CPU); awake, dancing or
+// changing shape she gets every frame the screen shows.
+function wantedFps() { return (sim.awake < 0.08 && !music.active && trans.p >= 1 && !sim.rings.length && layout.frac === layout.target) ? 24 : 0; }
+let last = performance.now(), lastDrawn = 0, frames = 0, fpsT = 0, fps = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const cap = wantedFps();
+  if (cap && now - lastDrawn < 1000 / cap - 2) return;
+  lastDrawn = now;
+  const dt = clamp((now - last) / 1000, 0, 0.05);   // rAF's first timestamp can be earlier than performance.now()
+  last = now;
+  try { updateCards(dt); tick(dt); stepLabels(dt); draw(dt, S); drawLabels(); } catch (e) { console.error('[orb]', e); }
+  frames++; fpsT += dt; if (fpsT >= 1) { fps = frames / fpsT; frames = 0; fpsT = 0; }
+}
+compose(0, 0.016, S);
+requestAnimationFrame(frame);
+
+// ================================================================ websocket to avatar_server.py
+let ws = null, reconnectTimer = null, linkUp = false;
+function connect() {
+  clearTimeout(reconnectTimer);
+  try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
+  ws.onopen = () => { linkUp = true; try { ws.send(JSON.stringify({ type: 'hello', client: 'avatar', style: 'orb', ready: true })); } catch (e) {} };
+  ws.onclose = () => { linkUp = false; scheduleReconnect(); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    try { handle(msg); } catch (e) { console.error('[orb] message failed', msg, e); }
+  };
+}
+function scheduleReconnect() { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, 1500); }
+if (PARAMS.get('ws') !== 'off') connect();
+
+// ================================================================ Ctrl + mouse wheel over her: bigger / smaller
+// avatar_window.py resizes the window around her centre and remembers it (avatar_place.py).
+let wheelSteps = 0, wheelTimer = 0;
+addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();                        // never the browser's page zoom
+  wheelSteps += e.deltaY < 0 ? 1 : e.deltaY > 0 ? -1 : 0;
+  if (wheelTimer) return;
+  wheelTimer = setTimeout(() => {
+    const steps = Math.max(-6, Math.min(6, wheelSteps));
+    wheelSteps = 0; wheelTimer = 0;
+    const api = window.pywebview && window.pywebview.api;
+    if (steps && api && typeof api.scale === 'function') {
+      try { Promise.resolve(api.scale(Math.pow(1.08, steps))).catch(() => {}); } catch (err) {}
+    }
+  }, 90);
+}, { passive: false });
+
+// ================================================================ for tests and tuning (browser console)
+window.__orb = {
+  handle, sim, forms, trans, music, voice, S, look, layout, cards: cardMap,
+  form: () => trans.to.id,
+  state: () => ({ state: sim.state, raw: sim.raw, mood: sim.mood, form: trans.to.id, p: trans.p, music: music.active, musicMode, musicHold, fps, link: linkUp, n: N, opaque: OPAQUE }),
+  advance: s => { for (let t = 0; t < s; t += 1 / 30) { updateCards(1 / 30); tick(1 / 30); stepLabels(1 / 30); } },
+  render: () => { draw(1 / 60, S); drawLabels(); },
+  universe: UNI, onUniverse,
+  simMusic: on => { music.sim = !!on; music.simT = 0; },
+  setTrails: on => { trails = !!on; },
+};
+})();
+</script>
+</body>
+</html>

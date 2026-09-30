@@ -26,6 +26,16 @@ import netutil
 
 logger = logging.getLogger("voice_assistant")
 
+
+def _voice_refusal(kind: str):
+    """Voice ID (voice_id.py): None = go ahead, else what to say instead (it wasn't the owner's voice)."""
+    try:
+        import voice_id
+        return voice_id.guard(kind)
+    except Exception:  # noqa: BLE001 - Voice ID trouble must never block her
+        logger.exception("Voice ID check failed (non-fatal)")
+        return None
+
 # Documented at https://joaoapps.com/join/api/ ; independently confirmed against the endpoint
 # used by the (unrelated, open-source) "notifiers" Python library's Join integration.
 JOIN_PUSH_URL = "https://joinjoaomgcd.appspot.com/_ah/api/messaging/v1/sendPush"
@@ -143,6 +153,9 @@ def _send_sms(contact_name: str, message: str) -> str:
             ack=_t("sms_ack"),
             yes_phrases=("send", "send it", "हाँ भेज दो", "भेजो"),
         )
+    refusal = _voice_refusal("send_phone_sms")             # no yes/no question: the voice is checked here
+    if refusal:
+        return refusal
     return _send_sms_now(who, number, message)
 
 
@@ -163,6 +176,10 @@ def control_phone(action: str = "", contact: str = "", message: str = "", app_na
         return _t("not_set_up")
 
     key = (action or "").strip().lower().replace(" ", "_")
+    if key not in _ACTIONS_SMS:                     # SMS asks yes/no first; the question checks the voice
+        refusal = _voice_refusal("control_phone")
+        if refusal:
+            return refusal
 
     if key in _ACTIONS_RING:
         ok = _join_push({"find": "true"})

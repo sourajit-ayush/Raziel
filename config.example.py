@@ -31,6 +31,10 @@ WAKE_WORD_FALLBACK = "hey_jarvis"
 # detection. Lower = more sensitive (more false triggers). Higher = you have
 # to say it more clearly/loudly.
 WAKE_WORD_THRESHOLD = 0.5
+WAKE_WORD_THRESHOLD_MUSIC = 0.42  # used while other apps play music (the song masks your voice); None = off
+MEDIA_DUCK_ENABLED = True        # music playing: she waits for her name, then turns other apps down while she listens
+MEDIA_DUCK_LEVEL = 0.2           # 0.2 = 20 % of each app's own volume
+MEDIA_DUCK_MAX_SECONDS = 120     # safety: never keep them turned down longer than this
 
 # --- Audio recording ---------------------------------------------------------
 SAMPLE_RATE = 16000          # openWakeWord requires 16kHz
@@ -51,6 +55,10 @@ WHISPER_MODEL_SIZE = "small"    # tiny/base/small/medium/large-v3
 WHISPER_DEVICE = "cpu"          # set to "cuda" if you have a supported NVIDIA GPU
 WHISPER_COMPUTE_TYPE = "int8"   # int8 is fastest on CPU
 WHISPER_CPU_THREADS = 0         # 0 = automatic
+WHISPER_TEMPERATURES = (0.0, 0.2, 0.4)   # retry passes on a doubtful clip (fewer = never slow)
+WHISPER_PLAYLIST_HINTS = 12      # your Spotify playlist names as spelling hints (0 = off)
+WHISPER_APP_HINTS = True         # ChatGPT, Gemini, Spotify, WhatsApp, YouTube as spelling hints
+WHISPER_FOLDER_HINTS = 15        # short, unusual folder names (COA, DBMS...) as spelling hints (0 = off)
 
 # Names/terms Whisper tends to mishear. Add anything you say often that keeps
 # getting transcribed wrong - artists, friends' names, brand names, etc.
@@ -84,9 +92,33 @@ PIPER_CONFIG_PATH = os.path.join(_SCRIPT_DIR, f"{PIPER_VOICE_NAME}.onnx.json")
 PIPER_LENGTH_SCALE = 1.15
 TTS_VOLUME = 1.0     # 0.0 to 1.0
 
-# --- Avatar (3D VRM face) --------------------------------------------------
+# --- Avatar ------------------------------------------------------------------
 # Requires: pip install pywebview websockets
 AVATAR_ENABLED = True
+# "orb" = a living orb of glowing particles that turns into a dragon, sword, knight, butterfly,
+#         planet, heart or galaxy when asked ("become a dragon", "roar", "back to the orb") and
+#         dances to music playing on the PC. "vrm" = the 3D character below.
+AVATAR_STYLE = "orb"
+AVATAR_REMEMBER_PLACE = True     # reopen where you dragged her, at the size you gave her (Ctrl + wheel)
+AVATAR_START_X = None            # her spot when nothing is saved; None = right side of the main screen
+AVATAR_START_Y = None
+AVATAR_ORB_WINDOW_WIDTH = 420
+AVATAR_ORB_WINDOW_HEIGHT = 560
+AVATAR_ORB_LOOK = "sphere"        # "sphere" = inside a glass crystal ball, "float" = bare particles on the desktop
+AVATAR_PARTICLES = 24000         # fewer (e.g. 14000) = lighter on the CPU
+AVATAR_MUSIC_REACT = True        # dance to the PC's music (needs: pip install PyAudioWPatch)
+AVATAR_MUSIC_GAIN_DB = 0.0       # raise (e.g. 6) if she barely reacts to quiet music
+
+# --- Her universe (universes.py) ---------------------------------------------------------------
+# Raziel is the Nexus in the middle; six beings each look after one part of what she can do. Say a
+# name first: "Melody, play Kalyani", "Hermes, message Fazal", "Athena, explain paging", "Atlas,
+# open my COA folder", "Chronos, remind me at 6", "Sentinel, lock my laptop". "Show me the
+# universe" opens the map big; "who lives in your universe?" introduces them.
+UNIVERSES_ENABLED = True         # False = just Raziel, as before
+UNIVERSE_HOME = "universe"       # her resting look: "universe" (the galaxy map) or "orb"
+UNIVERSE_BIG_SECONDS = 40        # "show me the universe" stays big this long ("close the universe" ends it)
+# UNIVERSE_NAMES = {"music": "Melody", "messages": "Hermes", "knowledge": "Athena", "forge": "Atlas",
+#                   "time": "Chronos", "shield": "Sentinel"}   # rename any of them
 AVATAR_MODEL_PATH = os.path.join(_SCRIPT_DIR, "Raziel-1.vrm")
 AVATAR_HTML_PATH = os.path.join(_SCRIPT_DIR, "avatar.html")
 AVATAR_WINDOW_TITLE = "Raziel"
@@ -122,7 +154,7 @@ LLM_STREAMING = True
 OLLAMA_KEEP_ALIVE = "4h"
 
 # --- Conversation session (Phase 2) ------------------------------------------
-SLEEP_PHRASES = ["goodbye", "go to sleep", "अलविदा", "गुडबाय", "गुड बाय", "सो जाओ", "सो जाइए"]
+SLEEP_PHRASES = ["goodbye", "go to sleep", "go back to sleep", "अलविदा", "गुडबाय", "गुड बाय", "सो जाओ", "सो जाइए"]
 
 GENERATED_FILES_DIR = "generated_files"
 SCREENSHOTS_DIR = "screenshots"
@@ -179,6 +211,8 @@ HINDI_COMMANDS_ENABLED = True
 WHISPER_LANGUAGE = "auto"            # "auto" | "en" | "hi"
 HINDI_WHISPER_MODEL = "medium"
 HINDI_MIN_PROBABILITY = 0.6
+HINDI_SWITCH_PROBABILITY = 0.75     # ...and to switch from English to Hindi (higher = fewer English
+                                    # sentences sent to the slow Hindi model by mistake)
 HINDI_VOICE_NAME = "hi_IN-priyamvada-medium"
 HINDI_MODEL_PATH = os.path.join(_SCRIPT_DIR, f"{HINDI_VOICE_NAME}.onnx")
 HINDI_CONFIG_PATH = os.path.join(_SCRIPT_DIR, f"{HINDI_VOICE_NAME}.onnx.json")
@@ -253,3 +287,106 @@ JOIN_DEVICE_ID = ""
 # raise AI_CHAT_TYPE_DELAY.
 AI_CHAT_FOCUS_TIMEOUT = 15   # seconds to wait for the site to get keyboard focus before giving up
 AI_CHAT_TYPE_DELAY = 3       # extra seconds after focus, for the page to finish loading its message box
+AI_CHAT_READ_ANSWER = True   # after typing, wait for the site's answer and read it out (ai_answers.py)
+AI_CHAT_READ_FULL_WORDS = 70 # answers up to this many words are read in full; longer ones get a short
+                             # summary from the local model, then "say 'read it all'" for the whole thing
+AI_CHAT_ANSWER_TIMEOUT = 120 # seconds to wait for the answer to finish before giving up
+AI_CHAT_VISION_FALLBACK = True  # if the page text can't be read, describe the screen instead (needs VISION_*)
+AI_CHAT_VISION_WAIT = 25     # ...after waiting this long for the answer
+AI_CHAT_QUESTION_WAIT = 45      # 'open Gemini and type' with no question: the next sentence is it, for this long
+AI_CHAT_READ_ON_SEND = True     # 'send it' / 'press enter' in ChatGPT or Gemini also reads the answer
+
+# --- Several commands in one sentence (multi_command.py) --------------------------------------------
+# "open Spotify, play lo-fi and set the volume to 30" is split into its parts, and each part goes
+# through the same exact commands as when said on its own. Parts nothing recognises go to the
+# model together. Things that take the rest of the sentence ("remind me to call mum and dad",
+# "type hello and goodbye") are never split.
+MULTI_COMMAND_ENABLED = True
+
+# --- Voice ID: risky actions only for your voice (voice_id.py) ---------------------------------------
+# Learns your voice from the recordings in my_voice/ (the wake-word training clips) the first time,
+# then checks every command while Whisper is transcribing it. Only the actions in VOICE_ID_GUARDED
+# need your voice: shutting down, sending messages, deleting notes... Anyone can still ask the
+# time, the weather or play music. Phone commands always count as you (they carry your token).
+# Needs models/voice_id_resnet34.onnx (install_new_features.bat downloads it). Every check is
+# logged in assistant.log as "Voice ID: 0.63 (...)" - you are usually 0.5-0.8, other people
+# below 0.35. If she refuses you too often, lower VOICE_ID_THRESHOLD a little (e.g. 0.40); if a
+# TV voice gets through, raise it. After changing your mic, delete voice_profile.npz to relearn.
+OWNER_NAME = "Ayush"         # used in "Sorry, I only do that for Ayush."
+VOICE_ID_ENABLED = True
+VOICE_ID_THRESHOLD = 0.45    # this similarity or more = you
+VOICE_ID_REJECT_BELOW = 0.33 # below this = someone else; in between = "say it again, closer to the mic"
+VOICE_ID_MIN_SPEECH = 0.5    # seconds of speech needed to judge at all
+VOICE_ID_ADAPT = True        # clear matches (0.6+) slowly update your voice profile (new mic, a cold...)
+VOICE_ID_UNSURE_DROP_SPEECH = 2.5  # a 'not sure' this many seconds long (or longer) is someone else's
+                                   # talking and is ignored (unless you just called her); 'someone
+                                   # else' is always ignored. Short commands are kept.
+# VOICE_ID_LENIENT = ("lock_pc", "close_app")  # guarded actions a 'not sure' voice may still do
+# VOICE_ID_GUARDED = ("shutdown_pc", "restart_pc", ...)   # to change the list; see voice_id.DEFAULT_GUARDED
+
+# --- Game and call mode (quiet_mode.py) --------------------------------------------------------------
+# A full-screen game (or video) running: she never speaks on her own - timers, reminders and
+# notifications become Windows pop-ups - but still answers when you call her. Another app using
+# the microphone (Zoom, Discord, Teams, Meet in a browser...): fully silent, the wake word is off
+# too, until the call ends. "Do not disturb" / "quiet mode on" does the same by hand; "you can
+# talk again" lets her speak during a game for QUIET_OVERRIDE_SECONDS.
+QUIET_MODE_ENABLED = True
+QUIET_GAME_MODE = True
+QUIET_CALL_MODE = True
+QUIET_CALL_BLOCKS_WAKE_WORD = True
+QUIET_POPUP_TOAST = True     # Windows pop-ups (a card under the orb is shown too)
+QUIET_OVERRIDE_SECONDS = 1800
+QUIET_MIC_IGNORE = ()        # apps that use the mic but aren't calls, e.g. ("obs64.exe", "Voicemeeter")
+
+# --- Mini cards under the orb (cards.py, orb avatar only) --------------------------------------------
+# Running timers with a live countdown, the Spotify song with its album art, and today's weather
+# while she reads the morning briefing. The orb glides up to make room.
+CARDS_ENABLED = True
+CARDS_TIMERS = True
+CARDS_MUSIC = True           # album art needs the Spotify login Raziel already uses (.spotify_cache)
+CARDS_WEATHER = True
+CARDS_SPOTIFY_POLL_SECONDS = 5
+
+# --- Ask your own files (file_index.py) -------------------------------------------------------------
+# "find the PDF about the bank loan", "what does my resume say about Python?", "search my files
+# for ...", then "open it". Reads Documents, Downloads and Desktop in the background with a small
+# local model through Ollama - fully offline, kept in file_index.db. One-time:
+# `ollama pull nomic-embed-text` (about 270 MB; install_new_features.bat does it). Without it
+# the search still works by words (names and text), just not by meaning.
+FILE_INDEX_ENABLED = True
+FILE_INDEX_FOLDERS = []      # empty = Documents, Downloads, Desktop; or e.g. ["Documents", r"D:\Work"]
+FILE_INDEX_EXCLUDE = []      # folder names or full paths to skip, e.g. ["Old stuff", r"D:\Work\secret"]
+FILE_INDEX_EMBED_MODEL = "nomic-embed-text"
+FILE_INDEX_EMBED_ON_CPU = True  # keeps the graphics card for the chat model; False = faster first
+                                # indexing if your GPU has memory to spare (12 GB+)
+FILE_INDEX_MIN_SCORE = 0.5   # how close a match must be (the scores are in assistant.log)
+FILE_INDEX_MAX_FILE_MB = 30  # bigger files are found by name only
+FILE_INDEX_RESCAN_MINUTES = 20
+FILE_INDEX_START_DELAY = 60  # seconds after start-up before reading begins
+
+# --- Hand gestures in front of the webcam (gestures.py) ---------------------------------------------
+# Open palm (hold it still a moment) = play / pause. Swipe right / left = next / previous song, or
+# next / previous slide when PowerPoint, a PDF or Google Slides is in front. Swipe up / down = volume
+# (down while she's talking = skip ahead). Turn a fist like a knob = volume, two fingers up = screen
+# brightness. Thumbs up while a song plays = Spotify Liked Songs. Pinch (thumb + first finger, other
+# fingers open) and move = drag her window; pinch with both hands and pull apart / together = bigger
+# / smaller. "Stop watching" / "watch my hands" switch it off / on (remembered); "what gestures do
+# you know?". One-time setup: install_gestures.bat. Nothing is recorded; the camera light shows when
+# she watches. To see what she sees: venv\Scripts\python.exe gestures.py --check
+GESTURES_ENABLED = True
+GESTURES_CAMERA = 0              # which webcam (0 = the first one)
+GESTURES_PAUSE_IN_CALLS = True   # let go of the camera while Zoom / Discord / Teams is in a call
+GESTURES_MUSIC = True            # palm, swipes and volume
+GESTURES_KNOB = True             # fist / two fingers turned like a knob
+GESTURES_LIKE = True             # thumbs up -> Liked Songs (asks Spotify for one more permission once)
+GESTURES_SLIDES = True           # swipes turn slides / PDF pages when those are in front
+GESTURES_SKIP = True             # swipe down while she talks = skip ahead
+GESTURES_WINDOW = True           # pinch to move / resize her
+GESTURES_HOLD_SECONDS = 1.0      # how long to hold the open palm still (raise if music pauses by accident)
+GESTURES_SWIPE_DISTANCE = 0.18   # how far a swipe goes, as a share of the camera's width (0.22 before: a near hand left the picture first)
+GESTURES_KNOB_DEGREES = 12       # turning this much = one step
+GESTURES_VOLUME_STEP = 2         # % per knob step
+GESTURES_BRIGHTNESS_STEP = 4     # % per knob step
+GESTURES_RAISED = 0.8            # a palm counts only above this line (share of the picture's height; 1 = anywhere)
+GESTURES_UPRIGHT_DEGREES = 35    # ...and pointing up, leaning at most this much
+GESTURES_DEBUG_LOG = True        # keep the hand points around each gesture in gestures_debug.jsonl (numbers only)

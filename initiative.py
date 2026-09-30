@@ -89,6 +89,14 @@ class Context:
     first_contact_today: bool
 
 
+def _game_or_call() -> bool:
+    try:
+        import quiet_mode
+        return quiet_mode.active()
+    except Exception:
+        return False
+
+
 def _hour(ctx: Context) -> int:
     return ctx.now.hour
 
@@ -266,6 +274,14 @@ class Initiative:
             self.last_user_text = transcript or ""
             self.session_turns += 1
 
+    def note_wake(self):
+        """She was just woken by name: the silence is over (no "quiet for a while" line now), and nothing
+        unprompted for a few seconds while the conversation starts."""
+        with self._lock:
+            self.last_user_time = time.time()
+            # (not _suppress_until: that one also gates the microphone)
+            self._no_initiative_until = time.time() + 8.0
+
     def assistant_replied(self, text: str = ""):
         with self._lock:
             self.last_reply_text = text or ""
@@ -319,7 +335,7 @@ class Initiative:
                 if self.ignored_count >= IGNORED_LIMIT:
                     self.quiet_mode = True
 
-            if self._busy or now < self._suppress_until:
+            if self._busy or now < self._suppress_until or now < getattr(self, "_no_initiative_until", 0.0):
                 return
 
             # Non-verbal initiative runs even in quiet mode. Looking up at
@@ -330,6 +346,8 @@ class Initiative:
                 self._nonverbal()
 
             if self.quiet_mode:
+                return
+            if _game_or_call():                 # quiet_mode.py: a game, a call or "do not disturb"
                 return
             if not self._budget_ok(now):
                 return

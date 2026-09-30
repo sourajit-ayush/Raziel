@@ -485,6 +485,11 @@ def _self_check() -> Optional[str]:
     return None
 
 
+# The last one-shot "type ..." text: "send it and read me the answer" (tools.try_auto_ai_send) uses it to
+# find the answer below your question on the ChatGPT / Gemini page.
+last_typed = {"text": "", "at": 0.0}
+
+
 def type_now(text: str) -> str:
     """Types `text` once into the focused window (used by 'type hello world'). Returns the sentence to speak."""
     text = (str(text) if text is not None else "").strip()
@@ -500,6 +505,7 @@ def type_now(text: str) -> str:
         logger.warning("dictation: one-shot typing failed: %s", e)
         return _err_sentence(e, dictation=False)
     logger.info("dictation: one-shot typed %d chars", len(text))
+    last_typed.update(text=text, at=time.time())
     return _tr("typed")
 
 
