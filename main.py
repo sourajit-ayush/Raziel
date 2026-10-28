@@ -1241,7 +1241,7 @@ def main():
     # (stop_raziel.pyw) signals this instead, and she shuts down exactly as Ctrl+C would.
     instance_guard.start_stop_listener(lambda: shutdown.request_shutdown("Stop Raziel shortcut"))
 
-    if config.AVATAR_ENABLED:
+    if config.AVATAR_ENABLED and getattr(config, "AVATAR_WINDOW", True):
         import webview  # imported here so the assistant still runs fine
         # without pywebview installed if someone sets AVATAR_ENABLED = False
 
@@ -1265,6 +1265,17 @@ def main():
         # loop runs in the background thread pywebview starts for `func`.
         webview.start(func=run_voice_assistant, http_server=True)
     else:
+        if config.AVATAR_ENABLED:
+            # No orb window (AVATAR_WINDOW = False): only the avatar socket, which Companion Deck's
+            # notch reads for her state, timers and weather. No music listener: it only made the orb
+            # dance.
+            avatar_server.start()
+            logger.info("Avatar window off: her state goes to the avatar socket only (the notch shows it).")
+            try:
+                import cards
+                cards.start()           # timer countdowns and the weather, now shown on the notch
+            except Exception:
+                logger.exception("Couldn't start the mini cards")
         shutdown.install()
         run_voice_assistant()
 

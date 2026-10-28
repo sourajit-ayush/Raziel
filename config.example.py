@@ -95,6 +95,9 @@ TTS_VOLUME = 1.0     # 0.0 to 1.0
 # --- Avatar ------------------------------------------------------------------
 # Requires: pip install pywebview websockets
 AVATAR_ENABLED = True
+# False: no orb window. The avatar socket keeps running, so Companion Deck's notch shows her state,
+# timers and weather instead (2026-10-29). True brings the orb window back.
+AVATAR_WINDOW = False
 # "orb" = a living orb of glowing particles that turns into a dragon, sword, knight, butterfly,
 #         planet, heart or galaxy when asked ("become a dragon", "roar", "back to the orb") and
 #         dances to music playing on the PC. "vrm" = the 3D character below.
@@ -373,7 +376,7 @@ FILE_INDEX_START_DELAY = 60  # seconds after start-up before reading begins
 # / smaller. "Stop watching" / "watch my hands" switch it off / on (remembered); "what gestures do
 # you know?". One-time setup: install_gestures.bat. Nothing is recorded; the camera light shows when
 # she watches. To see what she sees: venv\Scripts\python.exe gestures.py --check
-GESTURES_ENABLED = True
+GESTURES_ENABLED = False         # off 2026-10-29: the camera isn't used. True turns hand gestures back on
 GESTURES_CAMERA = 0              # which webcam (0 = the first one)
 GESTURES_PAUSE_IN_CALLS = True   # let go of the camera while Zoom / Discord / Teams is in a call
 GESTURES_MUSIC = True            # palm, swipes and volume
