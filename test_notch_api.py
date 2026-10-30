@@ -64,9 +64,10 @@ class ShowMeMatch(unittest.TestCase):
         self.assertLessEqual(max(Image.open(io.BytesIO(jpeg)).size), show_me.MAX_SIDE)
         self.assertIsNone(show_me.to_jpeg(b"not an image"))
 
-    def test_nothing_on_wikipedia_lets_the_llm_answer(self):
+    def test_nothing_on_wikipedia_says_so_and_offline_lets_the_llm_answer(self):
         with mock.patch.object(show_me, "find", return_value=None):
-            self.assertIsNone(show_me.try_handle("show me the zorblax"))
+            self.assertEqual(show_me.try_handle("show me the zorblax"),
+                             "I couldn't find a picture of zorblax.")
         with mock.patch.object(show_me, "find", side_effect=OSError("offline")):
             self.assertIsNone(show_me.try_handle("show me the Taj Mahal"))
 

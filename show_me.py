@@ -8,7 +8,8 @@ sent, as a JPEG data URL: the notch itself loads nothing from the internet.
 
 Only clear "show me / what does X look like / picture of X" requests are matched; "show me the
 weather", "show me my files" and the like are left to the matchers that own them. When Wikipedia
-has nothing, try_handle() returns None and the LLM answers as usual.
+has no article, she says she couldn't find a picture; only when Wikipedia can't be reached does
+try_handle() return None, so the LLM answers as usual.
 
 Public API
 ----------
@@ -147,7 +148,7 @@ def try_handle(transcript: str) -> Optional[str]:
         logger.info("Show me: Wikipedia didn't answer (%s)", type(e).__name__)
         return None
     if found is None:
-        return None
+        return f"I couldn't find a picture of {subject}."
     title, sentence, jpeg = found
     if jpeg is not None:
         _show_card(title, jpeg)
