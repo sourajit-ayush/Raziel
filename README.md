@@ -365,6 +365,29 @@ Full setup (Tailscale + Tasker + Join, ~15 minutes, mostly free) is in
 `PHONE_BRIDGE_SETUP.md`.
 </details>
 
+## Companion Deck's notch
+
+Raziel's orb window is off (`AVATAR_WINDOW = False`); Companion Deck's notch shows her instead. It talks to her over the avatar socket, `ws://127.0.0.1:8765`, which only listens on this computer.
+
+**What everyone connected receives** (unchanged): her `state`, `speech_end`, her mini `card`s (timers, weather, the Spotify song) and `card_remove`. Raziel also sends an `image` card when you ask to see something ("show me the Eiffel Tower", "what does an axolotl look like?"):
+
+```json
+{"type": "card", "card": {"id": "image", "kind": "image", "title": "Eiffel Tower",
+ "image": "data:image/jpeg;base64,...", "source": "Wikipedia", "ttl": 60}}
+```
+
+The picture is the matching Wikipedia article's main image, at most 320 px and about 24 KB. Things without an article get no picture, only her spoken answer.
+
+**Requests (Companion Deck only).** A client may also ask Raziel things, but only after proving it's allowed:
+
+1. Raziel writes a random token to `%APPDATA%\Raziel\local_api.token` when she starts (your Windows account's folder; other accounts can't read it).
+2. The client sends `{"type": "hello", "token": "..."}` and gets `{"type": "hello_ok"}`. A wrong token, or a connection that came from a web page (it carries an `Origin` header), is closed.
+3. Then:
+   - `{"type": "ask", "id": "1", "text": "what's on my calendar"}` runs the text exactly like something you said, through the same yes/no confirmation for anything risky. She answers `{"type": "reply", "id": "1", "ok": true, "text": "..."}` without speaking.
+   - `{"type": "look", "id": "2"}`: she looks at the window in front (only that window, downscaled, with the local vision model) and replies the same way. The first look after she starts can take about a minute while the vision model loads; after that about 6 s.
+
+One request at a time, the same as talking to her; each gives up after 120 s with `"ok": false`.
+
 ## Running it
 
 ### Recommended: start automatically, no command prompt
