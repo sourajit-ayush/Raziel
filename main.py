@@ -338,6 +338,7 @@ DETERMINISTIC_MATCHERS = (
     ("quick-command", _quick_command_reply, False),          # pause / next / skip ...
     ("date-time", try_auto_datetime, True),                  # "what's the date / time / day" - instant
     ("screenshot", try_auto_screenshot, True),               # "take a screenshot"
+    ("show-me", _lazy("show_me"), True),                     # "show me the Eiffel Tower" (picture on the notch)
     ("screen-vision", _lazy("vision"), True),                # "what's on my screen"
     ("small-talk", try_auto_smalltalk, True),                # bare "thanks" / "hello"
     ("calculator", _lazy("calc"), True),                     # maths, units, currency
@@ -1168,6 +1169,13 @@ def run_voice_assistant(*_args):
         start_reminder_scheduler(speaker)    # timers / reminders / alarms ring even when she is asleep
         _start_extras(speaker)               # quiet mode, Voice ID, AI-answer reading, file index
         start_phone_bridge(brain, speaker)   # phone <-> PC bridge (off until config.PHONE_BRIDGE_TOKEN is set)
+        if config.AVATAR_ENABLED:
+            # Companion Deck's notch may ask too, over the avatar socket once it has the token
+            # (avatar_server.py): typed text runs like a spoken turn, "look" describes the window.
+            avatar_server.set_request_handlers(
+                ask=lambda text: handle_phone_command(brain, text),
+                look=lambda: __import__("vision").describe_window(),
+            )
 
         failures = 0
         while not shutdown.is_shutting_down():

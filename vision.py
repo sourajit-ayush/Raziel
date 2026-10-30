@@ -17,6 +17,9 @@ Public API
   match(transcript)             pure: (kind, question) or None; no I/O
   describe_screen(question="")  the LLM tool function
   capture_screen()              PNG bytes of the (downscaled) screen
+  describe_window(question="")  the same for the window in front only, for Companion Deck's notch
+                                ("look"); returns the text, nothing is spoken
+  capture_window()              PNG bytes of the (downscaled) window in front
   available_model()             first installed vision model or None (for a start-up log line)
   looking_phrase()              a short "one moment" line in the current language
 
@@ -243,6 +246,48 @@ def capture_screen() -> bytes:
     return buf.getvalue()
 
 
+def _foreground_box():
+    """The window in front, in screen pixels: (left, top, right, bottom), or None.
+
+    Asked with per-monitor DPI awareness for this thread, so the box matches what ImageGrab
+    captures on a scaled display."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    previous = None
+    try:
+        previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+    except Exception:  # noqa: BLE001 - older Windows: the box may be in scaled pixels
+        pass
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd or user32.IsIconic(hwnd):
+            return None
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        box = (rect.left, rect.top, rect.right, rect.bottom)
+    finally:
+        if previous:
+            user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous))
+    if box[2] - box[0] < 40 or box[3] - box[1] < 40:
+        return None
+    return box
+
+
+def capture_window() -> bytes:
+    """PNG bytes of only the window in front, at most VISION_MAX_WIDTH wide; the whole screen when
+    no window can be told apart. Kept in memory, never saved to disk."""
+    box = _foreground_box()
+    if box is None:
+        return capture_screen()
+    from PIL import ImageGrab
+    img = _downscale(ImageGrab.grab(bbox=box, all_screens=True), _cfg_number("VISION_MAX_WIDTH", 1280, int))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # ------------------------------------------------------------------ asking the model
 
 _INSTRUCTIONS = (
@@ -386,7 +431,17 @@ def describe_screen(question: str = "", **_ignored) -> str:
         return _t("failed")
 
 
-def _describe(question: str) -> str:
+def describe_window(question: str = "") -> str:
+    """Companion Deck's notch "look": answer about the window in front only (default: what is
+    it). Returns the text to show; nothing is spoken here. Never raises."""
+    try:
+        return _describe(str(question or "").strip()[:MAX_QUESTION_CHARS], window=True)
+    except Exception as e:                      # never a traceback for the notch
+        logger.warning("Vision: unexpected failure (window): %s", e, exc_info=True)
+        return _t("failed")
+
+
+def _describe(question: str, window: bool = False) -> str:
     if not _cfg("VISION_ENABLED", True):
         logger.info("Vision: disabled in settings")
         return _t("off")
@@ -402,14 +457,15 @@ def _describe(question: str) -> str:
         return _t("need_model", model=_candidates()[0])
 
     try:
-        png = capture_screen()
+        png = capture_window() if window else capture_screen()
     except Exception as e:
         logger.warning("Vision: could not capture the screen: %s", e)
         return _t("capture")
 
     prompt = _build_prompt(question)
-    logger.info("Vision: asking %s about the screen (%d KB image, lang=%s): %s",
-                model, len(png) // 1024, lang.current(), question or "(describe)")
+    logger.info("Vision: asking %s about the %s (%d KB image, lang=%s): %s",
+                model, "window" if window else "screen", len(png) // 1024, lang.current(),
+                question or "(describe)")
     started = time.monotonic()
     try:
         resp = _chat(client, model, prompt, png)

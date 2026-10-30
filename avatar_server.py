@@ -27,15 +27,27 @@ Orb avatar (avatar_orb.html) only - the 3D avatar simply ignores these:
     avatar_server.send_action("roar")           # roar fire fly stay swing attack block raise
     avatar_server.send_music(True, bands, wave) # 48 band bytes from music_listener.py
     avatar_server.set_dance(False)              # "stop dancing"
+
+Requests from Companion Deck's notch (README "Companion Deck's notch"):
+
+    avatar_server.set_request_handlers(ask=fn(text) -> str, look=fn() -> str)
+
+A client that sends {"type": "hello", "token": ...} with the token from token_path() (written
+fresh at every start) may then send {"type": "ask", "id", "text"} and {"type": "look", "id"};
+each is answered with {"type": "reply", "id", "ok", "text"}. A connection from a web page (it
+has an Origin header) never gets that far. Everyone still receives the broadcasts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
+import secrets
 import threading
 import time
-from typing import Any, Dict, Iterable, Optional, Set
+from typing import Any, Callable, Dict, Iterable, Optional, Set
 
 try:
     import websockets
@@ -103,6 +115,12 @@ _server = None
 _started = threading.Event()
 _stopping = threading.Event()
 
+# Requests from Companion Deck's notch: the token for this run, and what answers them.
+REQUEST_TIMEOUT = 120.0
+MAX_ASK_CHARS = 500
+_token: Optional[str] = None
+_handlers: Dict[str, Callable[..., Any]] = {}
+
 # Replayed to any client that connects, so a mid-conversation reload doesn't
 # leave the avatar sitting in the wrong state.
 _last: Dict[str, Dict[str, Any]] = {
@@ -135,12 +153,107 @@ async def _handler(websocket, *_args):
             await websocket.send(json.dumps({**msg, "replay": True}))
         for card in list(cards().values()):
             await websocket.send(json.dumps({"type": "card", "card": card, "replay": True}))
-        async for _raw in websocket:
-            pass  # avatar.html only sends a 'hello'; nothing to act on
+        state = {"authed": False}
+        async for raw in websocket:
+            await _on_message(websocket, raw, state)
     except Exception:
         pass
     finally:
         _clients.discard(websocket)
+
+
+def token_path() -> str:
+    """Where this run's token is: the user's own profile, which other accounts can't read."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "Raziel", "local_api.token")
+
+
+def _write_token() -> None:
+    global _token
+    _token = secrets.token_urlsafe(32)
+    path = token_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="ascii") as f:
+            f.write(_token)
+    except OSError as exc:  # requests just won't be possible this run
+        print(f"[avatar] couldn't write the request token: {exc}")
+        _token = None
+
+
+def set_request_handlers(ask: Optional[Callable[[str], Any]] = None,
+                         look: Optional[Callable[[], Any]] = None) -> None:
+    """main.py: what answers `ask` (text, like something said) and `look` (the window in front)."""
+    if ask is not None:
+        _handlers["ask"] = ask
+    if look is not None:
+        _handlers["look"] = look
+
+
+def _origin(websocket) -> Optional[str]:
+    """The Origin header, if any: browsers always send one, local programs don't."""
+    headers = getattr(websocket, "request_headers", None)
+    if headers is None:
+        headers = getattr(getattr(websocket, "request", None), "headers", None)
+    try:
+        return headers.get("Origin") if headers is not None else None
+    except Exception:
+        return None
+
+
+async def _on_message(websocket, raw, state: Dict[str, bool]) -> None:
+    """The avatar page only says hello; Companion Deck may also ask (after a valid token)."""
+    try:
+        msg = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(msg, dict):
+        return
+    kind = msg.get("type")
+    if kind == "hello" and "token" in msg:
+        token = msg.get("token")
+        if (_origin(websocket) is None and _token is not None and isinstance(token, str)
+                and hmac.compare_digest(token.encode(), _token.encode())):
+            state["authed"] = True
+            await websocket.send(json.dumps({"type": "hello_ok"}))
+        else:
+            await websocket.close(4001, "not allowed")
+        return
+    if kind not in ("ask", "look"):
+        return  # the avatar page's plain hello, or anything unknown
+    if not state.get("authed"):
+        await websocket.close(4001, "not allowed")
+        return
+    rid = msg.get("id")
+    if not isinstance(rid, str) or not 0 < len(rid) <= 64:
+        return
+    args = ()
+    if kind == "ask":
+        text = msg.get("text")
+        if not isinstance(text, str) or not 0 < len(text.strip()) <= MAX_ASK_CHARS:
+            await websocket.send(json.dumps({"type": "reply", "id": rid, "ok": False,
+                                             "text": "That question is empty or too long."}))
+            return
+        args = (text.strip(),)
+    ok, answer = await _run_request(kind, args)
+    await websocket.send(json.dumps({"type": "reply", "id": rid, "ok": ok, "text": answer}))
+
+
+async def _run_request(kind: str, args: tuple) -> tuple:
+    handler = _handlers.get(kind)
+    if handler is None:
+        return False, "Raziel can't do that right now."
+    loop = asyncio.get_running_loop()
+    try:
+        answer = await asyncio.wait_for(loop.run_in_executor(None, handler, *args), REQUEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        return False, "That took too long."
+    except Exception as exc:  # noqa: BLE001 - the asker gets an answer whatever happens
+        print(f"[avatar] {kind} request failed: {type(exc).__name__}")
+        return False, "Something went wrong."
+    if not isinstance(answer, str):
+        answer = " ".join(str(part) for part in (answer or ()) if part)
+    return True, answer.strip() or "Done."
 
 
 async def _serve():
@@ -210,6 +323,7 @@ def start(timeout: float = 3.0) -> bool:
         return True
     _stopping.clear()
     _started.clear()
+    _write_token()
     _thread = threading.Thread(target=_run_loop, name="avatar-ws", daemon=True)
     _thread.start()
     ok = _started.wait(timeout)
