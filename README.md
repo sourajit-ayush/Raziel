@@ -388,6 +388,13 @@ The picture is the matching Wikipedia article's main image, at most 320 px and a
 
 One request at a time, the same as talking to her; each gives up after 120 s with `"ok": false`.
 
+**Push-to-talk** (`push_to_talk.py`). Hold **Right Ctrl**, speak, and let go: she types your words into the app in front, with dictation's checks (never into her own window), and says nothing. While she waits for her name she reads the key on every microphone frame (no keyboard hook), so:
+- a hold counts after 0.3 s;
+- another key pressed or released meanwhile makes it a shortcut and cancels it (Right Ctrl + C still copies);
+- a key that stays down the whole time doesn't count.
+
+Whisper runs with fast settings for this (one pass, language detected in the same pass): about 2 s for a sentence. Hindi goes again through the Hindi model, so it is slower. Her state message carries `"mode": "dictation"`, so Companion Deck's notch says *Listening…* / *Typing…*. The log keeps only lengths and timings, never the words. Set `PUSH_TO_TALK_KEY` in `config.py` to `"right_alt"`, or `None` to turn it off; it is off in the middle of a spoken conversation with her.
+
 ## Running it
 
 ### Recommended: start automatically, no command prompt
