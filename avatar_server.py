@@ -355,12 +355,15 @@ def is_connected() -> bool:
     return bool(_clients)
 
 
-def set_state(state: str):
-    """idle | listening | thinking | speaking — drives posture, gaze, brow."""
+def set_state(state: str, mode: str = None):
+    """idle | listening | thinking | speaking — drives posture, gaze, brow. `mode` "dictation" =
+    push-to-talk (push_to_talk.py): Companion Deck's notch then says "Listening..." / "Typing...". """
     if state not in VALID_STATES:
         return
     _note_state(state)
     _last["state"] = {"type": "state", "state": state}
+    if mode:
+        _last["state"]["mode"] = mode
     _send(_last["state"])
 
 

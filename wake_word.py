@@ -36,6 +36,7 @@ Two things added after the first real-voice tests:
 import logging
 import os
 import time
+from collections import deque
 
 import numpy as np
 import pyaudio
@@ -43,6 +44,7 @@ from openwakeword.model import Model
 
 import config
 import initiative
+import push_to_talk
 import shutdown
 
 logger = logging.getLogger("voice_assistant")
@@ -88,6 +90,14 @@ def _mic_gated() -> bool:
         return False
 
 
+def _ptt_state(state: str):
+    try:
+        import avatar_server
+        avatar_server.set_state(state, mode="dictation" if state != "idle" else None)
+    except Exception:
+        logger.debug("push-to-talk: couldn't show the state", exc_info=True)
+
+
 class WakeWordDetector:
     def __init__(self):
         wanted = config.WAKE_WORD_MODEL
@@ -116,7 +126,16 @@ class WakeWordDetector:
         self._near_peak = 0.0
         self._near_quiet = 0
         self._near_last_log = 0.0
+        # Push-to-talk (push_to_talk.py): the key is watched on the frames read here.
+        vk = push_to_talk.configured_key()
+        self._ptt = push_to_talk.Hold(vk) if vk is not None else None
+        self.ptt_audio = None       # a finished recording, for main.py to type
         logger.info("openWakeWord model loaded.")
+
+    def take_ptt_audio(self):
+        """The push-to-talk recording that ended the last wait (16 kHz mono int16), once."""
+        audio, self.ptt_audio = self.ptt_audio, None
+        return audio
 
     def _open_stream(self):
         self.stream = self.pa.open(
@@ -255,6 +274,9 @@ class WakeWordDetector:
         was_gated = False
         next_check = time.time() + check_every
         prev = 0.0
+        ptt = self._ptt if stop_when is None else None   # not while waiting over music mid-talk
+        ptt_recent = deque(maxlen=int(push_to_talk.MIN_HOLD * config.SAMPLE_RATE / config.FRAME_LENGTH) + 2)
+        ptt_frames = None
 
         while not shutdown.is_shutting_down():
             if stop_when is not None and time.time() >= next_check:
@@ -282,6 +304,31 @@ class WakeWordDetector:
             if was_gated:
                 self.model.reset()      # drop features built from her own voice
                 was_gated = False
+
+            if ptt is not None:
+                event = ptt.poll()
+                if event == "start":
+                    ptt_frames = list(ptt_recent) + [pcm_bytes]   # from the press, not 0.3 s later
+                    _ptt_state("listening")
+                    continue
+                if event == "cancel":
+                    ptt_frames = None          # it was a shortcut (Right Ctrl + C ...)
+                    _ptt_state("idle")
+                    continue
+                if event == "release" and ptt_frames is not None:
+                    ptt_frames.append(pcm_bytes)
+                    self.ptt_audio = b"".join(ptt_frames)
+                    self.model.reset()         # the recording isn't wake-word material
+                    return True
+                if ptt_frames is not None:
+                    if ptt.recording:
+                        ptt_frames.append(pcm_bytes)
+                        continue               # no wake word while you dictate
+                    ptt_frames = None
+                if ptt.pressed_at is not None:
+                    ptt_recent.append(pcm_bytes)
+                else:
+                    ptt_recent.clear()
 
             audio_chunk = np.frombuffer(pcm_bytes, dtype=np.int16)
             predictions = self.model.predict(audio_chunk)

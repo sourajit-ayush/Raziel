@@ -1104,6 +1104,42 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             _media_unduck("answered")    # the music comes back up; while it plays she waits for her name
 
 
+def _push_to_talk(transcriber, pcm: bytes):
+    """The push-to-talk key came up (push_to_talk.py): transcribe the recording fast and type it into
+    the app in front. Nothing is spoken; only lengths and timings are logged, never the words."""
+    import tempfile
+    import wave
+    import push_to_talk
+    avatar_server.set_state("thinking", mode="dictation")      # the notch: "Typing..."
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            path = f.name
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(config.SAMPLE_RATE)
+            w.writeframes(pcm)
+        started = time.time()
+        text = transcriber.transcribe_dictation(path)
+        took = time.time() - started
+        problem = push_to_talk.type_words(text)
+        seconds = len(pcm) / 2 / config.SAMPLE_RATE
+        if problem:
+            logger.info("Push-to-talk: %.1f s recorded, not typed (%s)", seconds, problem)
+        else:
+            logger.info("Push-to-talk: %.1f s recorded, %d chars typed, Whisper %.2f s", seconds, len(text), took)
+    except Exception:
+        logger.exception("Push-to-talk failed")
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        avatar_server.set_state("idle")
+
+
 def run_voice_assistant(*_args):
     """
     The actual voice assistant loop. When the avatar is enabled, pywebview
@@ -1183,6 +1219,10 @@ def run_voice_assistant(*_args):
                 pre_roll_frames = wake_detector.wait_for_wake_word()
                 if shutdown.is_shutting_down():
                     break
+                ptt_audio = wake_detector.take_ptt_audio()
+                if ptt_audio is not None:
+                    _push_to_talk(transcriber, ptt_audio)      # typed, not a conversation
+                    continue
                 _media_duck("wake word")          # music playing? turn it down while she listens
                 try:
                     run_awake_session(

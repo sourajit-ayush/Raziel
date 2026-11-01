@@ -50,6 +50,11 @@ VOICE_TRIGGER_MARGIN = 400          # how much louder than ambient noise real sp
 MIN_SUSTAINED_VOICE_MS = 200        # sound must stay loud this long to count as real speech
 SILENCE_STOP_MARGIN = 250           # how much louder than ambient counts as "still talking"
 
+# --- Push-to-talk (push_to_talk.py) ------------------------------------------
+# Hold this key, speak, release: Raziel types your words into the app in front. "right_ctrl",
+# "right_alt", or None = off. (Not Ctrl+Win: Wispr Flow uses that.)
+PUSH_TO_TALK_KEY = "right_ctrl"
+
 # --- Speech-to-text (faster-whisper) -----------------------------------------
 WHISPER_MODEL_SIZE = "small"    # tiny/base/small/medium/large-v3
 WHISPER_DEVICE = "cpu"          # set to "cuda" if you have a supported NVIDIA GPU

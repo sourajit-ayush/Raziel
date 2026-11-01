@@ -274,6 +274,42 @@ class Transcriber:
 
     # ------------------------------------------------------------------ transcription
 
+    def transcribe_dictation(self, wav_path: str) -> str:
+        """Push-to-talk (push_to_talk.py): fast settings, because the words should appear about a
+        second after the key comes up. One beam, no retries, no spelling hints, Whisper's own voice
+        filter. Measured on this laptop: 1.8 s for a 6 s sentence, against 4-5 s with transcribe()'s
+        settings, the same words (Companion Deck PHASE-12 E0)."""
+        duration = 0.0
+        try:
+            samples, sample_rate = transcript_guard.load_wav(wav_path)
+            has_speech, stats, reason = transcript_guard.check_audio(samples, sample_rate)
+            if not has_speech:
+                logger.info("Push-to-talk: no speech (%s)", reason)
+                return ""
+            duration = getattr(stats, "duration_s", 0.0)
+        except Exception as e:
+            logger.warning("Push-to-talk audio check failed (%s) - transcribing anyway.", e)
+            duration = 0.0
+        # The language is detected inside the same pass: Raziel's separate check (_choose_language)
+        # added 1.6 s here. Hindi goes again through the Hindi model, only when Whisper is sure.
+        mode = self._language_mode()
+        fixed = "en" if (not self._hindi_wanted() or mode == "en") else ("hi" if mode == "hi" else None)
+        fast = dict(beam_size=1, vad_filter=True, condition_on_previous_text=False,
+                    temperature=0.0, without_timestamps=True)
+        model = self.hindi_model if fixed == "hi" and self.hindi_model else self.model
+        segments, info = model.transcribe(wav_path, language=fixed, **fast)
+        segments = list(segments)
+        language = fixed or ("hi" if info.language == "hi" else "en")
+        need = float(getattr(config, "HINDI_SWITCH_PROBABILITY", 0.75))
+        if fixed is None and language == "hi" and (info.language_probability or 0) >= need and duration >= 1.0:
+            if self.hindi_model is not None:
+                segments, _info = self.hindi_model.transcribe(wav_path, language="hi", **fast)
+                segments = list(segments)
+        elif fixed is None:
+            language = "en"
+        self._prev_language, self.last_language = self.last_language, language
+        return " ".join(s.text.strip() for s in segments).strip()
+
     def transcribe(self, wav_path: str) -> str:
         guard_on = getattr(config, "GUARD_ENABLED", True)
 
