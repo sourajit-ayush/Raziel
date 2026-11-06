@@ -297,16 +297,22 @@ class Transcriber:
         fast = dict(beam_size=1, vad_filter=True, condition_on_previous_text=False,
                     temperature=0.0, without_timestamps=True)
         model = self.hindi_model if fixed == "hi" and self.hindi_model else self.model
-        segments, info = model.transcribe(wav_path, language=fixed, **fast)
-        segments = list(segments)
-        language = fixed or ("hi" if info.language == "hi" else "en")
-        need = float(getattr(config, "HINDI_SWITCH_PROBABILITY", 0.75))
-        if fixed is None and language == "hi" and (info.language_probability or 0) >= need and duration >= 1.0:
-            if self.hindi_model is not None:
+        segments, info = model.transcribe(wav_path, language=fixed, **fast)   # lazy: decoded below
+        language = fixed
+        if language is None:
+            # Whisper chose from every language; only English and Hindi count, as in _choose_language
+            # (a short English clip easily comes out as Urdu or Nepali, and would be typed in that script).
+            probs = dict(getattr(info, "all_language_probs", None) or ())
+            if not probs:
+                probs = {info.language: info.language_probability or 0.0}
+            en_p, hi_p = probs.get("en", 0.0), probs.get("hi", 0.0)
+            need = float(getattr(config, "HINDI_SWITCH_PROBABILITY", 0.75))
+            language = "hi" if (hi_p >= need and hi_p > en_p and duration >= 1.0) else "en"
+            if language == "hi" and self.hindi_model is not None:
                 segments, _info = self.hindi_model.transcribe(wav_path, language="hi", **fast)
-                segments = list(segments)
-        elif fixed is None:
-            language = "en"
+            elif language != info.language:
+                segments, _info = self.model.transcribe(wav_path, language=language, **fast)
+        segments = list(segments)
         self._prev_language, self.last_language = self.last_language, language
         return " ".join(s.text.strip() for s in segments).strip()
 

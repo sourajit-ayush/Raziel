@@ -164,5 +164,32 @@ class RequestChannel(unittest.TestCase):
         self.assertEqual((got[1]["id"], got[1]["ok"]), ("9", False))
 
 
+class BusyRequest(unittest.TestCase):
+    """main.handle_phone_command with lock_timeout: a notch request that can't start in time is
+    dropped, never run later after the notch was told it failed."""
+
+    def test_gives_up_without_running_while_a_turn_holds_the_lock(self):
+        import main
+        with mock.patch.object(main, "route_transcript") as route, \
+             mock.patch.object(main, "confirmation_reply", return_value=None):
+            main._turn_lock.acquire()
+            try:
+                reply = main.handle_phone_command(object(), "open notepad", lock_timeout=0.1)
+            finally:
+                main._turn_lock.release()
+            self.assertEqual(reply, main._say("busy"))
+            route.assert_not_called()
+        self.assertFalse(main._turn_lock.locked())
+
+    def test_runs_when_free_and_releases_the_lock(self):
+        import main
+        with mock.patch.object(main, "route_transcript", return_value="Opened Notepad."), \
+             mock.patch.object(main, "confirmation_reply", return_value=None), \
+             mock.patch.object(main, "_remember_reply"), mock.patch.object(main, "_engine"):
+            self.assertEqual(main.handle_phone_command(object(), "open notepad", lock_timeout=0.1),
+                             "Opened Notepad.")
+        self.assertFalse(main._turn_lock.locked())
+
+
 if __name__ == "__main__":
     unittest.main()

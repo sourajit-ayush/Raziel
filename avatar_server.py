@@ -117,6 +117,10 @@ _stopping = threading.Event()
 
 # Requests from Companion Deck's notch: the token for this run, and what answers them.
 REQUEST_TIMEOUT = 120.0
+# How long an "ask" waits for a spoken turn to finish before giving up without running (main.py's
+# handle_phone_command). Well under REQUEST_TIMEOUT, so a request the notch was told failed never
+# starts later; what is left is for the command itself.
+REQUEST_LOCK_WAIT = 45.0
 MAX_ASK_CHARS = 500
 _token: Optional[str] = None
 _handlers: Dict[str, Callable[..., Any]] = {}
@@ -247,7 +251,8 @@ async def _run_request(kind: str, args: tuple) -> tuple:
     try:
         answer = await asyncio.wait_for(loop.run_in_executor(None, handler, *args), REQUEST_TIMEOUT)
     except asyncio.TimeoutError:
-        return False, "That took too long."
+        # The thread can't be stopped: it already started, so it may still finish (see REQUEST_LOCK_WAIT).
+        return False, "That's taking a long time. It may still finish."
     except Exception as exc:  # noqa: BLE001 - the asker gets an answer whatever happens
         print(f"[avatar] {kind} request failed: {type(exc).__name__}")
         return False, "Something went wrong."

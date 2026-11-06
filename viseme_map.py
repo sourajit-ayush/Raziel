@@ -13,7 +13,7 @@ basic viseme lip-sync implementations handle consonants).
 _VISEME_MAP = {
     # Open vowels -> aa
     "a": "aa", "ɑ": "aa", "ʌ": "aa", "æ": "aa", "ɐ": "aa",
-    "aɪ": "aa", "aʊ": "aa", "ə\u02c8": "aa",
+    "aɪ": "aa", "ə\u02c8": "aa",
     # Mid/front vowels -> ih
     "ɪ": "ih", "ɛ": "ih", "e": "ih", "ə": "ih", "ɜ": "ih", "ɚ": "ih",
     # Rounded back vowels -> ou

@@ -147,6 +147,8 @@ _M = {
     "goodbye_pending": {"en": "Goodbye. I did not go through with the pending request.",
                         "hi": "अलविदा। जो अनुरोध बाकी था, वह पूरा नहीं किया गया।"},
     "failed": {"en": "That request failed.", "hi": "वह अनुरोध पूरा नहीं हो पाया।"},
+    "busy": {"en": "I'm still busy with something else. Try again in a moment.",
+             "hi": "मैं अभी किसी और काम में लगी हूँ। थोड़ी देर में फिर से कहिए।"},
     "understood": {"en": "Understood.", "hi": "समझ गई।"},
     "yes": {"en": "Yes?", "hi": "हाँ?"},
     "didnt_catch": {"en": "Sorry, I didn't catch that. What should I do?", "hi": "माफ़ कीजिए, मैं समझ नहीं पाई। क्या करना है?"},
@@ -753,36 +755,46 @@ def start_reminder_scheduler(speaker):
 
 # --- phone bridge (Phase 6): phone <-> PC ---------------------------------------
 
-def handle_phone_command(brain, transcript: str) -> str:
+def handle_phone_command(brain, transcript: str, lock_timeout: float = None) -> str:
     """The phone -> PC command endpoint's core: runs `transcript` through the exact same
     pipeline as a normal spoken turn - a pending yes/no answer first, then the deterministic
     matchers, then the LLM brain - so a phone-issued command behaves identically to speaking to
     her in the room, including confirmation.py's two-turn "say yes to confirm" flow for risky
     actions (a phone "yes" arms/answers it exactly like a spoken one would). Nothing is played on
     THIS PC's speakers - the finished reply is just returned as text for the phone to show. Runs
-    under _turn_lock, same as the mic loop, so the two can never run at once and interleave."""
-    with _turn_lock, _phone_trusted(), _phone_no_wait():
-        try:
-            reply = confirmation_reply(transcript, brain)
-            if reply is None:
-                reply = route_transcript(transcript, brain)
+    under _turn_lock, same as the mic loop, so the two can never run at once and interleave.
+
+    `lock_timeout` (seconds): give up, without running anything, if she is still busy with a spoken
+    turn by then. The notch's request times out on its side, and a command it was told failed must
+    not run minutes later. None = wait as long as it takes (the phone bridge)."""
+    if not _turn_lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
+        logger.info("Request not run: still busy with a spoken turn after %.0f s", lock_timeout)
+        return _say("busy")
+    try:
+        with _phone_trusted(), _phone_no_wait():
+            try:
+                reply = confirmation_reply(transcript, brain)
+                if reply is None:
+                    reply = route_transcript(transcript, brain)
+                if not isinstance(reply, str):
+                    # Joined HERE, inside trusted(): a streamed reply runs its tools while it is read.
+                    reply = " ".join(p for p in reply if p)
+            except Exception:
+                logger.exception("Handling a phone command failed")
+                return _say("failed")
+
             if not isinstance(reply, str):
-                # Joined HERE, inside trusted(): a streamed reply runs its tools while it is read.
-                reply = " ".join(p for p in reply if p)
-        except Exception:
-            logger.exception("Handling a phone command failed")
-            return _say("failed")
+                # Streaming LLM reply (an iterator of sentences) - there's no speaker to feed them to
+                # here, so just join it into one string for the phone.
+                reply = " ".join(reply)
 
-        if not isinstance(reply, str):
-            # Streaming LLM reply (an iterator of sentences) - there's no speaker to feed them to
-            # here, so just join it into one string for the phone.
-            reply = " ".join(reply)
-
-        confirmation.settle(reply)
-        confirmation.restart_timer()
-        _remember_reply(reply)
-        _engine("assistant_replied", reply)
-        return reply
+            confirmation.settle(reply)
+            confirmation.restart_timer()
+            _remember_reply(reply)
+            _engine("assistant_replied", reply)
+            return reply
+    finally:
+        _turn_lock.release()
 
 
 def handle_phone_notification(speaker, app: str, title: str, text: str) -> None:
@@ -1065,9 +1077,12 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             else:
                 interrupted, barge_in_pre_roll = speaker.speak_interruptible(reply, pa)
         else:
-            # Streaming LLM reply: she starts talking after the first sentence.
-            interrupted, barge_in_pre_roll, reply = speaker.speak_stream_interruptible(
-                reply, pa, protect=confirmation.expects_answer)
+            # Streaming LLM reply: she starts talking after the first sentence. The generator runs its
+            # tools and writes the brain's history while it is read, so it is read under _turn_lock too:
+            # a notch / phone request (handle_phone_command) must not run in the middle of it.
+            with _turn_lock:
+                interrupted, barge_in_pre_roll, reply = speaker.speak_stream_interruptible(
+                    reply, pa, protect=confirmation.expects_answer)
             logger.info("Reply: %s", reply)
         if not (reply or "").strip() and not interrupted:
             # The model found nothing it could do with that (it used to say "Understood." to anything).
@@ -1209,7 +1224,7 @@ def run_voice_assistant(*_args):
             # Companion Deck's notch may ask too, over the avatar socket once it has the token
             # (avatar_server.py): typed text runs like a spoken turn, "look" describes the window.
             avatar_server.set_request_handlers(
-                ask=lambda text: handle_phone_command(brain, text),
+                ask=lambda text: handle_phone_command(brain, text, lock_timeout=avatar_server.REQUEST_LOCK_WAIT),
                 look=lambda: __import__("vision").describe_window(),
             )
 

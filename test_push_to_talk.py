@@ -145,5 +145,61 @@ class TypeWordsTests(unittest.TestCase):
             typed.assert_not_called()
 
 
+class _Seg:
+    def __init__(self, text):
+        self.text = text
+
+
+class _Model:
+    """A stand-in Whisper model: detects `detected` (with `probs`), and writes `language`'s text."""
+
+    def __init__(self, detected, probs, name="small"):
+        self.detected, self.probs, self.name, self.calls = detected, probs, name, []
+
+    def transcribe(self, path, language=None, **kw):
+        self.calls.append(language)
+        lang = language or self.detected
+        info = mock.Mock(language=lang, language_probability=self.probs.get(lang, 0.0),
+                         all_language_probs=sorted(self.probs.items(), key=lambda kv: -kv[1]))
+        return iter([_Seg(f"{self.name}:{lang}")]), info
+
+
+class DictationLanguageTests(unittest.TestCase):
+    """transcribe_dictation: only English or Hindi is ever typed, never Whisper's other guesses."""
+
+    def _run(self, model, hindi_model=None, duration=3.0):
+        import transcriber
+        t = transcriber.Transcriber.__new__(transcriber.Transcriber)
+        t.model, t.hindi_model, t.last_language, t._prev_language = model, hindi_model, "en", "en"
+        stats = mock.Mock(duration_s=duration)
+        with mock.patch.object(transcriber.transcript_guard, "load_wav", return_value=([], 16000)), \
+             mock.patch.object(transcriber.transcript_guard, "check_audio", return_value=(True, stats, "")), \
+             mock.patch.object(t, "_language_mode", return_value="auto"), \
+             mock.patch.object(t, "_hindi_wanted", return_value=True):
+            return t.transcribe_dictation("x.wav"), t.last_language
+
+    def test_english_mistaken_for_urdu_is_typed_in_english(self):
+        model = _Model("ur", {"ur": 0.5, "en": 0.3, "hi": 0.2})
+        self.assertEqual(self._run(model), ("small:en", "en"))
+        self.assertEqual(model.calls, [None, "en"])
+
+    def test_english_needs_no_second_pass(self):
+        model = _Model("en", {"en": 0.9, "hi": 0.05})
+        self.assertEqual(self._run(model), ("small:en", "en"))
+        self.assertEqual(model.calls, [None])
+
+    def test_clear_hindi_goes_to_the_hindi_model(self):
+        model, hindi = _Model("hi", {"hi": 0.9, "en": 0.05}), _Model("hi", {"hi": 1.0}, name="big")
+        self.assertEqual(self._run(model, hindi), ("big:hi", "hi"))
+
+    def test_unsure_hindi_is_typed_in_english(self):
+        model = _Model("hi", {"hi": 0.5, "en": 0.4})
+        self.assertEqual(self._run(model), ("small:en", "en"))
+
+    def test_one_word_stays_english(self):
+        model = _Model("hi", {"hi": 0.9, "en": 0.05})
+        self.assertEqual(self._run(model, duration=0.5), ("small:en", "en"))
+
+
 if __name__ == "__main__":
     unittest.main()
