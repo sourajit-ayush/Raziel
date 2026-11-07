@@ -29,3 +29,6 @@ pypdf>=4.0
 # --- Hand gestures (gestures.py). Optional. OpenCV is pinned below 4.12 so numpy stays 1.x. ---
 mediapipe==1.0.1
 opencv-contrib-python==4.10.0.84
+
+# --- Echo cancellation (echo_cancel.py): WebRTC's AEC3, so you can talk over her on laptop speakers. Optional. ---
+livekit==1.1.20

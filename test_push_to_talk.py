@@ -200,6 +200,56 @@ class DictationLanguageTests(unittest.TestCase):
         model = _Model("hi", {"hi": 0.9, "en": 0.05})
         self.assertEqual(self._run(model, duration=0.5), ("small:en", "en"))
 
+    def test_hindi_before_the_hindi_model_is_loaded(self):
+        # On demand: the normal model writes this sentence in Hindi, and the Hindi model starts loading.
+        import transcriber
+        model = _Model("hi", {"hi": 0.9, "en": 0.05})
+        with mock.patch.object(transcriber.Transcriber, "_start_hindi_loader") as load, \
+             mock.patch.object(transcriber.config, "HINDI_WHISPER_ON_DEMAND", True, create=True):
+            self.assertEqual(self._run(model), ("small:hi", "hi"))
+        load.assert_called_once()
+
+
+class HindiModelMemoryTests(unittest.TestCase):
+    def _transcriber(self):
+        import transcriber
+        t = transcriber.Transcriber.__new__(transcriber.Transcriber)
+        t.model, t.hindi_model, t._hindi_used_at = object(), object(), 0.0
+        return transcriber, t
+
+    def test_let_go_after_being_unused(self):
+        transcriber, t = self._transcriber()
+        with mock.patch.object(transcriber.time, "sleep"), \
+             mock.patch.object(transcriber.time, "monotonic", return_value=11 * 60.0), \
+             mock.patch.object(transcriber.config, "HINDI_WHISPER_UNLOAD_MINUTES", 10, create=True):
+            t._unload_hindi_when_idle()
+        self.assertIsNone(t.hindi_model)
+
+    def test_kept_while_in_use(self):
+        transcriber, t = self._transcriber()
+        hindi = t.hindi_model
+        times = iter([5 * 60.0, 5 * 60.0 + 30])          # used at 5 min, checked 30 s later
+        checks = []
+
+        def sleep(_s):
+            checks.append(1)
+            if len(checks) > 1:
+                t.hindi_model = None                      # end the loop on the second check
+        with mock.patch.object(transcriber.time, "sleep", side_effect=sleep), \
+             mock.patch.object(transcriber.time, "monotonic", side_effect=lambda: next(times)), \
+             mock.patch.object(transcriber.config, "HINDI_WHISPER_UNLOAD_MINUTES", 10, create=True):
+            self.assertIs(t._hindi(), hindi)              # a Hindi sentence at 5 min
+            t._unload_hindi_when_idle()
+        self.assertEqual(len(checks), 2)                  # still there at the first check
+
+    def test_never_lets_go_of_the_shared_model(self):
+        transcriber, t = self._transcriber()
+        t.hindi_model = t.model                           # HINDI_WHISPER_MODEL == WHISPER_MODEL_SIZE
+        with mock.patch.object(transcriber.time, "sleep"), \
+             mock.patch.object(transcriber.time, "monotonic", return_value=1e9):
+            t._unload_hindi_when_idle()
+        self.assertIs(t.hindi_model, t.model)
+
 
 if __name__ == "__main__":
     unittest.main()

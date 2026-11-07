@@ -36,6 +36,7 @@ from piper import PiperVoice, SynthesisConfig
 
 import avatar_server
 import config
+import echo_cancel
 import lang
 from emotion import classify as classify_emotion
 from viseme_map import phoneme_to_viseme
@@ -119,6 +120,35 @@ def _rms(chunk_bytes: bytes) -> float:
     if len(samples) == 0:
         return 0.0
     return float(np.sqrt(np.mean(samples**2)))
+
+
+def _barge_settings(ec):
+    """(level threshold, grace period) for barge-in. With echo cancelling the same as without unless
+    config lowers them (BARGE_IN_*_AEC): cancelling then only removes her voice, so false barge-ins can
+    only get rarer. A lower threshold also lets other sounds in the room through (2026-11-07: two false
+    barge-ins at 1500), so it is lowered only once the log shows what is left of her voice."""
+    if ec is None:
+        return config.BARGE_IN_RMS_THRESHOLD, config.BARGE_IN_GRACE_PERIOD
+    return (float(getattr(config, "BARGE_IN_RMS_THRESHOLD_AEC", config.BARGE_IN_RMS_THRESHOLD)),
+            float(getattr(config, "BARGE_IN_GRACE_PERIOD_AEC", config.BARGE_IN_GRACE_PERIOD)))
+
+
+def _log_mic_peak(raw_peak: float, peak: float, threshold: float, ec, extra: str = ""):
+    if ec is None:
+        logger.info("Mic level while speaking: peak %.0f (barge-in threshold %s)%s", peak, threshold, extra)
+    else:
+        logger.info("Mic level while speaking: peak %.0f raw, %.0f after echo cancelling (barge-in threshold %.0f)%s",
+                    raw_peak, peak, threshold, extra)
+
+
+# When her sentences started coming out of the speakers (main.py's turn timing reads it).
+_play_starts = deque(maxlen=64)
+
+
+def first_audio_after(t: float):
+    """time.monotonic() at which she first made a sound after `t`, or None."""
+    starts = [s for s in list(_play_starts) if s >= t]
+    return min(starts) if starts else None
 
 
 class Speaker:
@@ -336,7 +366,11 @@ class Speaker:
                 speech_started = True
 
             chunk_size = 2048
+            ec = echo_cancel.get()
+            if ec is not None:
+                ec.playback_started()
             _playing.set()
+            _play_starts.append(time.monotonic())
             for i in range(0, len(pcm_data), chunk_size):
                 if stop_event is not None and stop_event.is_set():
                     break
@@ -344,7 +378,10 @@ class Speaker:
                     _skip.clear()
                     logger.info("Skipped ahead (gesture)")
                     break
-                stream.write(pcm_data[i:i + chunk_size])
+                chunk = pcm_data[i:i + chunk_size]
+                stream.write(chunk)
+                if ec is not None:
+                    ec.feed(chunk, frame_rate, sample_width, n_channels)   # the echo canceller's reference
             stream.stop_stream()
             stream.close()
         finally:
@@ -410,15 +447,17 @@ class Speaker:
         )
         play_thread.start()
 
+        ec = echo_cancel.get()
+        threshold, grace = _barge_settings(ec)
         # Brief grace period before listening, so it doesn't instantly
         # trip on the first syllable of its own speech through the speakers.
-        time.sleep(config.BARGE_IN_GRACE_PERIOD)
+        time.sleep(grace)
 
         chunks_per_second = config.SAMPLE_RATE / config.FRAME_LENGTH
         pre_roll = deque(maxlen=max(1, int(0.5 * chunks_per_second)))
 
         stream = None
-        peak = 0.0                       # loudest mic frame while she spoke (echo level, for tuning)
+        peak = raw_peak = 0.0            # loudest mic frame while she spoke (echo level, for tuning)
         consecutive = 0                  # frames in a row at/above threshold (debounce)
         need = max(1, int(getattr(config, "BARGE_IN_CONSECUTIVE_FRAMES", 1)))
         try:
@@ -431,14 +470,19 @@ class Speaker:
             )
             while play_thread.is_alive():
                 data = stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+                raw_level = _rms(data)
+                raw_peak = max(raw_peak, raw_level)
+                if ec is not None:
+                    data = ec.clean(data)
                 pre_roll.append(data)
                 level = _rms(data)
                 peak = max(peak, level)
-                if level >= config.BARGE_IN_RMS_THRESHOLD:
+                if level >= threshold:
                     consecutive += 1
                     if consecutive >= need:
-                        logger.info("Barge-in detected (mic level %.0f >= %s, %d frames), stopping speech.",
-                                    level, config.BARGE_IN_RMS_THRESHOLD, consecutive)
+                        logger.info("Barge-in detected (mic level %.0f >= %.0f, %d frames%s), stopping speech.",
+                                    level, threshold, consecutive,
+                                    f"; {raw_level:.0f} before echo cancelling" if ec is not None else "")
                         stop_event.set()
                         interrupted["value"] = True
                         break
@@ -451,8 +495,7 @@ class Speaker:
 
         play_thread.join(timeout=3)
         if not interrupted["value"]:
-            logger.info("Mic level while speaking: peak %.0f (barge-in threshold %s)",
-                        peak, config.BARGE_IN_RMS_THRESHOLD)
+            _log_mic_peak(raw_peak, peak, threshold, ec)
         return interrupted["value"], (list(pre_roll) if interrupted["value"] else None)
 
     def speak_stream_interruptible(self, pieces, pa: pyaudio.PyAudio, protect=None):
@@ -574,7 +617,9 @@ class Speaker:
 
         monitor_failed = False
         stream = None
-        peak = 0.0                       # loudest mic frame while she spoke (echo level, for tuning)
+        ec = echo_cancel.get()
+        threshold, grace = _barge_settings(ec)
+        peak = raw_peak = 0.0            # loudest mic frame while she spoke (echo level, for tuning)
         consecutive = 0                  # frames in a row at/above threshold (debounce)
         need = max(1, int(getattr(config, "BARGE_IN_CONSECUTIVE_FRAMES", 1)))
         try:
@@ -587,24 +632,29 @@ class Speaker:
             )
             while play_thread.is_alive():
                 data = stream.read(config.FRAME_LENGTH, exception_on_overflow=False)
+                raw = data
+                if ec is not None:
+                    data = ec.clean(data)        # every frame, so the canceller stays in step
                 pre_roll.append(data)
                 # Barge-in only counts once she is actually TALKING (plus the
                 # usual grace period so her first syllable through the speakers
                 # doesn't trip it). Until then she is still thinking or running a
                 # tool - and a tool can be loud itself (music starting), which
                 # must not read as "the user interrupted".
-                if not first_audio_at or time.time() - first_audio_at[0] < config.BARGE_IN_GRACE_PERIOD:
+                if not first_audio_at or time.time() - first_audio_at[0] < grace:
                     continue
+                raw_peak = max(raw_peak, _rms(raw))
                 level = _rms(data)
                 peak = max(peak, level)
                 if protected.is_set():
                     consecutive = 0
                     continue                     # a question she must finish asking
-                if level >= config.BARGE_IN_RMS_THRESHOLD:
+                if level >= threshold:
                     consecutive += 1
                     if consecutive >= need:
-                        logger.info("Barge-in detected (mic level %.0f >= %s, %d frames), stopping speech.",
-                                    level, config.BARGE_IN_RMS_THRESHOLD, consecutive)
+                        logger.info("Barge-in detected (mic level %.0f >= %.0f, %d frames%s), stopping speech.",
+                                    level, threshold, consecutive,
+                                    f"; {_rms(raw):.0f} before echo cancelling" if ec is not None else "")
                         stop_event.set()
                         interrupted["value"] = True
                         break
@@ -621,9 +671,8 @@ class Speaker:
         else:
             play_thread.join(timeout=3)
         if not interrupted["value"] and first_audio_at:
-            logger.info("Mic level while speaking: peak %.0f (barge-in threshold %s)%s",
-                        peak, config.BARGE_IN_RMS_THRESHOLD,
-                        " - a yes/no question was protected" if protected.is_set() else "")
+            _log_mic_peak(raw_peak, peak, threshold, ec,
+                          " - a yes/no question was protected" if protected.is_set() else "")
         # Make sure the LLM generator has been closed (and its history
         # bookkeeping done) BEFORE the next turn starts using the same Brain.
         threads[0].join(timeout=6)

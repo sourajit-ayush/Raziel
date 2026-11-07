@@ -964,6 +964,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         wav_path = record_until_silence(
             pa, pre_roll_frames=pending_pre_roll, ambient_level=current_ambient_level
         )
+        t_heard = time.monotonic()           # you stopped talking (turn timing, _log_turn_timing)
         pending_pre_roll = None
         current_ambient_level = None
         if shutdown.is_shutting_down():
@@ -980,6 +981,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             transcript = transcriber.transcribe(wav_path)
         finally:
             _gestures_busy(False)
+        t_text = time.monotonic()
 
         if transcript and _not_your_voice(was_addressed, media_now):
             logger.info("Ignored %r - %s", transcript,
@@ -1062,6 +1064,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         except Exception:
             logger.exception("Handling that request failed")
             reply = _say("failed")
+        t_routed = time.monotonic()
 
         if isinstance(reply, str) and not reply.strip():
             reply = ""                        # nothing to say (the model found no request in it)
@@ -1084,6 +1087,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
                 interrupted, barge_in_pre_roll, reply = speaker.speak_stream_interruptible(
                     reply, pa, protect=confirmation.expects_answer)
             logger.info("Reply: %s", reply)
+        _log_turn_timing(t_heard, t_text, t_routed)
         if not (reply or "").strip() and not interrupted:
             # The model found nothing it could do with that (it used to say "Understood." to anything).
             # Called by name: say so; otherwise it was most likely someone else talking - stay quiet.
@@ -1117,6 +1121,20 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         else:
             addressed = False
             _media_unduck("answered")    # the music comes back up; while it plays she waits for her name
+
+
+def _log_turn_timing(t_heard: float, t_text: float, t_routed: float):
+    """One line per turn: where the wait between you stopping and her starting went.
+      transcribe   Whisper
+      route        fast-path matchers, or the LLM's whole answer when it isn't streamed
+      first sound  the LLM's first sentence (streamed) + speech synthesis + opening the speakers"""
+    import speaker as speaker_mod
+    first = speaker_mod.first_audio_after(t_routed)
+    if first is None:
+        logger.info("Turn timing: transcribe %.2f s, route %.2f s (no sound)", t_text - t_heard, t_routed - t_text)
+        return
+    logger.info("Turn timing: transcribe %.2f s, route %.2f s, first sound %.2f s - %.2f s from you stopping "
+                "to her speaking", t_text - t_heard, t_routed - t_text, first - t_routed, first - t_heard)
 
 
 def _push_to_talk(transcriber, pcm: bytes):

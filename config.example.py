@@ -140,6 +140,15 @@ BARGE_IN_GRACE_PERIOD = 0.6
 BARGE_IN_RMS_THRESHOLD = 4500
 BARGE_IN_CONSECUTIVE_FRAMES = 3
 
+# Echo cancellation (echo_cancel.py, needs `pip install livekit`): her own voice is subtracted from the
+# mic while she speaks, so she cuts herself off less. Barge-in keeps the thresholds above unless you
+# lower them here. The log's "Mic level while speaking: peak X raw, Y after echo cancelling" lines
+# show how much is left of her voice: a lower threshold must stay well above the Y values, and every
+# other sound in the room (a video, someone talking) counts too - 1500 gave false barge-ins here.
+ECHO_CANCELLATION = True
+# BARGE_IN_RMS_THRESHOLD_AEC = 3000
+# BARGE_IN_GRACE_PERIOD_AEC = 0.4
+
 # --- Misc ---------------------------------------------------------------------
 TEMP_AUDIO_PATH = "temp_recording.wav"
 LOG_FILE = "assistant.log"
@@ -218,6 +227,10 @@ HINDI_ENABLED = True
 HINDI_COMMANDS_ENABLED = True
 WHISPER_LANGUAGE = "auto"            # "auto" | "en" | "hi"
 HINDI_WHISPER_MODEL = "medium"
+# "medium" takes about 4.3 GB of memory: it loads on the first Hindi sentence (that one uses the
+# normal model) and is let go after this many minutes without Hindi. False = loaded all the time.
+HINDI_WHISPER_ON_DEMAND = True
+HINDI_WHISPER_UNLOAD_MINUTES = 10
 HINDI_MIN_PROBABILITY = 0.6
 HINDI_SWITCH_PROBABILITY = 0.75     # ...and to switch from English to Hindi (higher = fewer English
                                     # sentences sent to the slow Hindi model by mistake)

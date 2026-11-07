@@ -171,8 +171,9 @@ class Transcriber:
         self._prev_language = "en"
         self.hindi_model = None             # bigger model for Hindi, loaded in the background
         self._hindi_loading = False
+        self._hindi_used_at = 0.0
         self._threads = threads
-        if self._hindi_wanted() and self._language_mode() != "en":
+        if self._hindi_wanted() and self._language_mode() != "en" and not self._hindi_on_demand():
             self._start_hindi_loader()
 
     # ------------------------------------------------------------------ Hindi support
@@ -184,6 +185,38 @@ class Transcriber:
     @staticmethod
     def _hindi_wanted() -> bool:
         return bool(getattr(config, "HINDI_ENABLED", True))
+
+    # The Hindi model ("medium") commits about 4.3 GB and Hindi is rare (7 of 469 turns by 2026-11-07),
+    # so by default it loads on the first Hindi sentence - that one uses the normal model - and is let go
+    # after HINDI_WHISPER_UNLOAD_MINUTES without Hindi. HINDI_WHISPER_ON_DEMAND = False keeps it loaded.
+
+    @staticmethod
+    def _hindi_on_demand() -> bool:
+        return bool(getattr(config, "HINDI_WHISPER_ON_DEMAND", True))
+
+    def _hindi(self):
+        """The Hindi model when it is loaded (the caller falls back to the normal model otherwise). On
+        demand, asking for it while it isn't loaded starts loading it for the next Hindi sentence."""
+        model = getattr(self, "hindi_model", None)
+        if model is not None:
+            self._hindi_used_at = time.monotonic()
+            return model
+        if self._hindi_wanted() and self._hindi_on_demand():
+            logger.info("Hindi: the normal model takes this sentence; the Hindi model loads for the next.")
+            self._start_hindi_loader()
+        return None
+
+    def _unload_hindi_when_idle(self):
+        minutes = float(getattr(config, "HINDI_WHISPER_UNLOAD_MINUTES", 10))
+        while True:
+            time.sleep(30)
+            model = self.hindi_model
+            if model is None or model is self.model:
+                return
+            if time.monotonic() - self._hindi_used_at >= minutes * 60:
+                self.hindi_model = None      # freed once a transcription still using it is done
+                logger.info("Hindi Whisper model let go after %.0f min without Hindi (frees memory).", minutes)
+                return
 
     def _start_hindi_loader(self):
         name = getattr(config, "HINDI_WHISPER_MODEL", "medium")
@@ -206,8 +239,12 @@ class Transcriber:
                 except TypeError:
                     model = WhisperModel(name, device=config.WHISPER_DEVICE,
                                          compute_type=config.WHISPER_COMPUTE_TYPE)
+                self._hindi_used_at = time.monotonic()
                 self.hindi_model = model
                 logger.info("Hindi Whisper model '%s' ready.", name)
+                if self._hindi_on_demand() and float(getattr(config, "HINDI_WHISPER_UNLOAD_MINUTES", 10)) > 0:
+                    threading.Thread(target=self._unload_hindi_when_idle, name="hindi-whisper-unload",
+                                     daemon=True).start()
             except Exception as e:                   # no network, disk full ...
                 logger.warning("Couldn't load the Hindi Whisper model '%s' (%s) - Hindi will use the "
                                "normal model, which is less accurate.", name, e)
@@ -296,7 +333,7 @@ class Transcriber:
         fixed = "en" if (not self._hindi_wanted() or mode == "en") else ("hi" if mode == "hi" else None)
         fast = dict(beam_size=1, vad_filter=True, condition_on_previous_text=False,
                     temperature=0.0, without_timestamps=True)
-        model = self.hindi_model if fixed == "hi" and self.hindi_model else self.model
+        model = (self._hindi() if fixed == "hi" else None) or self.model
         segments, info = model.transcribe(wav_path, language=fixed, **fast)   # lazy: decoded below
         language = fixed
         if language is None:
@@ -308,8 +345,9 @@ class Transcriber:
             en_p, hi_p = probs.get("en", 0.0), probs.get("hi", 0.0)
             need = float(getattr(config, "HINDI_SWITCH_PROBABILITY", 0.75))
             language = "hi" if (hi_p >= need and hi_p > en_p and duration >= 1.0) else "en"
-            if language == "hi" and self.hindi_model is not None:
-                segments, _info = self.hindi_model.transcribe(wav_path, language="hi", **fast)
+            hindi = self._hindi() if language == "hi" else None
+            if hindi is not None:
+                segments, _info = hindi.transcribe(wav_path, language="hi", **fast)
             elif language != info.language:
                 segments, _info = self.model.transcribe(wav_path, language=language, **fast)
         segments = list(segments)
@@ -334,7 +372,7 @@ class Transcriber:
         language = self._choose_language(wav_path, getattr(stats, "duration_s", 0.0) if stats else 0.0)
         model = self.model
         if language == "hi":
-            model = self.hindi_model or self.model
+            model = self._hindi() or self.model
         vocabulary_prompt = _build_vocabulary_prompt() if language == "en" else ""
         started = time.time()
         segments, _info = model.transcribe(
