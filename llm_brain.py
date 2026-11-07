@@ -18,6 +18,7 @@ import config
 import confirmation
 import lang
 import memory
+import ollama_guard
 from routing import AskLLM
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 
@@ -522,6 +523,7 @@ class Brain:
         after every start-up. Safe to call from a background thread; changes
         no conversation state.
         """
+        ollama_guard.ensure_running()        # after a reboot Raziel may start before Ollama does
         started = time.time()
         logger.info("Warming up the language model (loading %s into memory)...",
                     config.OLLAMA_MODEL)
@@ -678,7 +680,7 @@ class Brain:
                                   "hi": "माफ़ कीजिए, मैं समझ नहीं पाई कि क्या करना है।"}}, "m")
         return reply
 
-    def _respond_blocking(self, _retry: bool = True) -> str:
+    def _respond_blocking(self, _retry: bool = True, _start_ollama: bool = True) -> str:
         started = time.time()
         try:
             response = self.client.chat(
@@ -690,6 +692,11 @@ class Brain:
                 keep_alive=config.OLLAMA_KEEP_ALIVE,
             )
         except Exception as e:
+            # Ollama not running (closed, or not started yet after a reboot): start it and ask once more.
+            if (_start_ollama and ollama_guard.is_connection_error(e) and not ollama_guard.is_up()
+                    and ollama_guard.ensure_running()):
+                logger.info("Ollama is up again - asking once more.")
+                return self._respond_blocking(_retry=_retry, _start_ollama=False)
             logger.error("Ollama request failed: %s", e)
             return self._finish_turn(
                 "I'm having trouble reaching my local brain right now. "

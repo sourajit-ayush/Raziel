@@ -152,11 +152,14 @@ ECHO_CANCELLATION = True
 # --- Misc ---------------------------------------------------------------------
 TEMP_AUDIO_PATH = "temp_recording.wav"
 LOG_FILE = "assistant.log"
+LOG_MAX_MB = 5                 # assistant.log starts over at this size (0 = never); older parts are kept
+LOG_BACKUPS = 3                # ...as assistant.log.1, .2, .3
 
 # --- LLM brain (Ollama - local, free, no API key) ----------------------------
 # Requires Ollama installed and running locally: https://ollama.com/download
 # Then pull a model once: `ollama pull qwen3:8b`
 OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_AUTOSTART = True        # Ollama not running? She starts it herself (ollama_guard.py)
 OLLAMA_MODEL = "qwen3:8b"
 OLLAMA_ENABLE_THINKING = False
 

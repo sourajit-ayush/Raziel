@@ -34,6 +34,7 @@ matchers ahead of the LLM, imported lazily so a broken one only disables itself.
 import shutdown  # MUST stay the first import: see shutdown.py (MKL Ctrl+C handler)
 import importlib
 import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -90,9 +91,20 @@ def _utf8_console():
             pass
 
 
+def _log_file_handler() -> logging.Handler:
+    """assistant.log, started over at LOG_MAX_MB (the old part kept as assistant.log.1 ... .N): it
+    grew forever before (1 MB by 2026-11-07, and every turn adds to it)."""
+    max_mb = float(getattr(config, "LOG_MAX_MB", 5))
+    if max_mb <= 0:
+        return logging.FileHandler(config.LOG_FILE, encoding="utf-8")
+    return logging.handlers.RotatingFileHandler(
+        config.LOG_FILE, maxBytes=int(max_mb * 1024 * 1024),
+        backupCount=max(1, int(getattr(config, "LOG_BACKUPS", 3))), encoding="utf-8")
+
+
 def setup_logging():
     _utf8_console()
-    handlers = [logging.FileHandler(config.LOG_FILE, encoding="utf-8")]
+    handlers = [_log_file_handler()]
     # Started in the background by start_raziel.pyw there's no console to show log lines in: they
     # would only be copied into raziel_console.log, which is meant for what assistant.log can't
     # catch (a crash before logging starts, pywebview's own messages).

@@ -10,6 +10,7 @@ google_token.json
 memory.db
 assistant.log
 *.log
+*.log.[0-9]*
 temp_recording.wav
 generated_files/
 screenshots/
