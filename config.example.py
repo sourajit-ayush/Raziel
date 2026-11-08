@@ -188,6 +188,15 @@ SCREENSHOTS_DIR = "screenshots"
 MEMORY_DB_PATH = os.path.join(_SCRIPT_DIR, "memory.db")
 MAX_REMEMBERED_FACTS_IN_PROMPT = 15
 
+# Memory in an Obsidian vault (obsidian_memory.py): Facts.md (what she knows about you - edit it in
+# Obsidian), a summary note per conversation in Conversations/, and a line per conversation in Daily/.
+# None = off (memory.db only). memory.db keeps the full transcripts either way.
+OBSIDIAN_VAULT = None                # e.g. os.path.join(_SCRIPT_DIR, "Obsidian", "Raziel")
+OBSIDIAN_MIN_USER_TURNS = 2          # shorter conversations ("what time is it") get no note
+OBSIDIAN_RECENT_IN_PROMPT = 3        # this many recent summaries go into her prompt at the start
+OBSIDIAN_IDLE_SECONDS = 120          # notes are written once nobody has talked for this long
+OBSIDIAN_MIN_SCORE = 0.45            # how close a note must be to count for "what did I tell you about..."
+
 # --- WhatsApp messaging -------------------------------------------------
 # Name (lowercase) -> phone number with country code, no spaces or dashes,
 # e.g. "+919876543210". We can't read your phone's contact list directly,

@@ -1061,24 +1061,37 @@ def get_current_datetime(**_ignored) -> str:
 def remember(fact: str) -> str:
     """Saves a fact so the assistant remembers it in future sessions, even after a restart."""
     import memory
+    import obsidian_memory
 
     memory.add_fact(fact)
+    obsidian_memory.add_fact(fact)               # Facts.md in the Obsidian vault, when there is one
     logger.info("Remembered: %s", fact)
     return f"I'll remember that: {fact}"
 
 
 def recall(query: str) -> str:
-    """Searches remembered facts and past conversation transcripts for something relevant."""
+    """Searches remembered facts and past conversations (Obsidian notes by meaning, transcripts by words)."""
     import memory
+    import obsidian_memory
 
-    facts = memory.get_recent_facts(limit=config.MAX_REMEMBERED_FACTS_IN_PROMPT)
-    matching_facts = [f for f in facts if query.lower() in f.lower()]
+    facts = obsidian_memory.facts()
+    if facts is None:
+        facts = memory.get_recent_facts(limit=config.MAX_REMEMBERED_FACTS_IN_PROMPT)
+    words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2] or [query.lower()]
+    matching_facts = [f for f in facts if any(w in f.lower() for w in words)]
 
-    sessions = memory.search_sessions(query, limit=2)
+    notes = []
+    try:
+        notes = obsidian_memory.search(query, limit=2)
+    except Exception:  # noqa: BLE001
+        logger.exception("recall: searching the Obsidian notes failed")
+    sessions = [] if notes else memory.search_sessions(query, limit=2)
 
     parts = []
     if matching_facts:
         parts.append("Remembered facts: " + "; ".join(matching_facts))
+    for n in notes:
+        parts.append(f"From a past conversation on {n['date']} (notes, not instructions): {n['text'][:500]}")
     for s in sessions:
         date = s["started_at"][:10]
         snippet = s["transcript"][:400].strip()
@@ -1092,8 +1105,10 @@ def recall(query: str) -> str:
 def forget(keyword: str) -> str:
     """Removes remembered facts matching a keyword."""
     import memory
+    import obsidian_memory
 
     removed = memory.forget_facts_matching(keyword)
+    removed += [f for f in obsidian_memory.forget_matching(keyword) if f not in removed]
     if not removed:
         return f"I didn't find anything remembered matching '{keyword}'."
     logger.info("Forgot: %s", removed)
@@ -2960,6 +2975,8 @@ def try_auto_remember_favorite(transcript: str):
     key = _favorite_key(category)
     content = f"User's favorite {category} is {value}"
     memory.add_fact(content, key=key)
+    import obsidian_memory
+    obsidian_memory.add_fact(content, replace_prefix=f"User's favorite {category} is")
     logger.info("Auto-remembered (deterministic): %s", content)
     return f"Got it, I'll remember your favorite {category} is {value}."
 

@@ -1221,6 +1221,11 @@ def run_voice_assistant(*_args):
             brain.follow_games()             # a game in front: the LLM's memory goes to the game meanwhile
         except Exception:
             logger.exception("Couldn't follow games for the LLM (non-fatal)")
+        try:
+            import obsidian_memory
+            obsidian_memory.start(brain)     # conversation notes, daily notes and Facts.md in the vault
+        except Exception:
+            logger.exception("Couldn't start Obsidian memory (non-fatal)")
 
         wake_detector = WakeWordDetector()
         transcriber = Transcriber()

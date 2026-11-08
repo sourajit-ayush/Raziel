@@ -22,6 +22,7 @@ voice_profile.npz
 file_index.db
 file_index.db-wal
 file_index.db-shm
+Obsidian/
 
 # --- Large binary models (over/near GitHub's 100MB file limit, and not code) ---
 *.onnx
