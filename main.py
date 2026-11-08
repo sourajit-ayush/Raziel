@@ -1099,7 +1099,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
                 interrupted, barge_in_pre_roll, reply = speaker.speak_stream_interruptible(
                     reply, pa, protect=confirmation.expects_answer)
             logger.info("Reply: %s", reply)
-        _log_turn_timing(t_heard, t_text, t_routed)
+        _log_turn_timing(t_heard, t_text, t_routed, transcript)
         if not (reply or "").strip() and not interrupted:
             # The model found nothing it could do with that (it used to say "Understood." to anything).
             # Called by name: say so; otherwise it was most likely someone else talking - stay quiet.
@@ -1135,13 +1135,16 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             _media_unduck("answered")    # the music comes back up; while it plays she waits for her name
 
 
-def _log_turn_timing(t_heard: float, t_text: float, t_routed: float):
+def _log_turn_timing(t_heard: float, t_text: float, t_routed: float, said: str = ""):
     """One line per turn: where the wait between you stopping and her starting went.
       transcribe   Whisper
       route        fast-path matchers, or the LLM's whole answer when it isn't streamed
-      first sound  the LLM's first sentence (streamed) + speech synthesis + opening the speakers"""
+      first sound  the LLM's first sentence (streamed) + speech synthesis + opening the speakers
+    The same numbers go to deliverables/turns.jsonl for the hub's metrics."""
+    import deliverables
     import speaker as speaker_mod
     first = speaker_mod.first_audio_after(t_routed)
+    deliverables.record_turn(said, t_text - t_heard, t_routed - t_text, None if first is None else first - t_routed)
     if first is None:
         logger.info("Turn timing: transcribe %.2f s, route %.2f s (no sound)", t_text - t_heard, t_routed - t_text)
         return
@@ -1266,6 +1269,13 @@ def run_voice_assistant(*_args):
                 ask=lambda text: handle_phone_command(brain, text, lock_timeout=avatar_server.REQUEST_LOCK_WAIT),
                 look=lambda: __import__("vision").describe_window(),
             )
+        try:
+            # Raziel Hub (hub_server.py): her deliverables, metrics and memory in the browser, on this PC only.
+            # Its ask box runs like the notch's: a typed request, the same pipeline as a spoken one.
+            import hub_server
+            hub_server.start(lambda text: handle_phone_command(brain, text, lock_timeout=45.0))
+        except Exception:
+            logger.exception("Couldn't start the hub (non-fatal)")
 
         failures = 0
         while not shutdown.is_shutting_down():

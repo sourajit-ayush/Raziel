@@ -14,6 +14,23 @@ from unittest import mock
 
 import ollama_guard
 
+_deliverables = []
+
+
+def setUpModule():
+    # Starting Ollama and game mode publish hub deliverables: into a temporary folder, not the real one.
+    folder = tempfile.mkdtemp()
+    patch = mock.patch.object(ollama_guard.config, "DELIVERABLES_DIR", folder, create=True)
+    patch.start()
+    _deliverables.extend([patch, folder])
+
+
+def tearDownModule():
+    import shutil
+    patch, folder = _deliverables
+    patch.stop()
+    shutil.rmtree(folder, ignore_errors=True)
+
 
 class _World:
     """Ollama comes up `up_after` seconds after it is launched (None = never)."""

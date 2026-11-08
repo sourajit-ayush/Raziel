@@ -23,7 +23,7 @@ pywebview's own messages) goes to raziel_console.log, and the previous run's cop
 raziel_console.prev.log.
 
 Command line (what the .bat / .pyw files call):
-    python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop
+    python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ STOP_TIMEOUT_SECONDS = 15     # shutdown.py force-exits after ~4 s, so this is g
 MAIN_SCRIPT = os.path.join(HERE, "main.py")
 START_SCRIPT = os.path.join(HERE, "start_raziel.pyw")
 STOP_SCRIPT = os.path.join(HERE, "stop_raziel.pyw")
+HUB_SCRIPT = os.path.join(HERE, "open_hub.pyw")
 CONSOLE_LOG = os.path.join(HERE, "raziel_console.log")
 PREV_CONSOLE_LOG = os.path.join(HERE, "raziel_console.prev.log")
 VENV_SCRIPTS = os.path.join(HERE, "venv", "Scripts")
@@ -62,6 +63,8 @@ SHORTCUTS = (
      "Start Raziel in the background - then just say Raziel"),
     ("Desktop", "Stop Raziel.lnk", STOP_SCRIPT, "",
      "Stop Raziel"),
+    ("Desktop", "Raziel Hub.lnk", HUB_SCRIPT, "",
+     "Open Raziel Hub: her reports, metrics and memory in your browser"),
 )
 
 ALREADY_RUNNING_TEXT = "Raziel is already running in the background.\n\nJust say \"Raziel\" to wake her."
@@ -120,6 +123,19 @@ def _rotate_console_log():
             os.replace(CONSOLE_LOG, PREV_CONSOLE_LOG)
     except OSError:
         pass                                                 # e.g. still open somewhere: just overwrite it
+
+
+# --- Raziel Hub ----------------------------------------------------------------
+
+def open_hub(argv=()) -> int:
+    """Opens Raziel Hub (hub_server.py) in the browser, with its key in the link. She must be running."""
+    import webbrowser
+    import hub_server
+    if not instance_guard.is_running():
+        notify("Raziel isn't running, so her hub isn't either.\n\nUse \"Start Raziel\" first.", error=True)
+        return 1
+    webbrowser.open(hub_server.url())
+    return 0
 
 
 # --- Start / stop --------------------------------------------------------------
@@ -340,7 +356,9 @@ def main(argv=None) -> int:
         return uninstall()
     if command == "status":
         return status()
-    print("usage: python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop")
+    if command == "hub":
+        return open_hub()
+    print("usage: python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub")
     return 2
 
 

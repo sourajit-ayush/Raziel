@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raziel Hub</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><circle cx="15" cy="15" r="13" fill="none" stroke="#FFB84D" stroke-width="2"></circle><circle cx="15" cy="15" r="5" fill="#FFB84D"></circle></svg>
+    <span>Raziel Hub</span>
+  </div>
+  <nav class="tabs" aria-label="Views" id="tabs"></nav>
+  <form class="askbar" id="askform">
+    <label for="ask" class="sr">Ask Raziel</label>
+    <input id="ask" class="input" autocomplete="off" maxlength="500" placeholder="Ask Raziel, or “Athena, what is virtual memory?”">
+    <button class="btn" type="submit" id="askbtn">Ask</button>
+  </form>
+</header>
+
+<main class="wrap">
+  <div id="notice" class="card notice" role="status" hidden></div>
+
+  <section class="hero" aria-label="Raziel's universe">
+    <div class="mapcol"><div class="map" id="map"></div></div>
+    <div class="focus">
+      <div class="label" id="kicker"></div>
+      <h1 id="heading">Raziel Hub</h1>
+      <p class="muted lead" id="blurb"></p>
+      <div class="pills" id="helpers"></div>
+      <div class="stats" id="stats"></div>
+    </div>
+  </section>
+
+  <div class="cols">
+    <section class="list" aria-label="Deliverables">
+      <div class="listhead">
+        <h2 id="listtitle">Deliverables</h2>
+        <span class="muted small" id="listnote"></span>
+      </div>
+      <div id="metrics" hidden></div>
+      <div class="grid" id="items"></div>
+      <div class="card empty" id="empty" hidden></div>
+    </section>
+
+    <aside class="side">
+      <section class="card pad">
+        <h2 class="h3">Vitals</h2>
+        <div id="vitals"></div>
+      </section>
+      <section class="card pad">
+        <div class="spread"><h2 class="h3">What she knows</h2><span class="muted small" id="factsrc"></span></div>
+        <div id="facts"></div>
+      </section>
+      <section class="card pad">
+        <h2 class="h3">This conversation</h2>
+        <div id="chat" class="chat"></div>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<dialog id="reader" aria-labelledby="readertitle">
+  <div class="spread"><h2 id="readertitle" class="h3"></h2><button class="ghost" id="readerclose">Close</button></div>
+  <div id="readerbody" class="readerbody"></div>
+</dialog>
+</body>
+</html>

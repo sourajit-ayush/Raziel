@@ -197,6 +197,12 @@ OBSIDIAN_RECENT_IN_PROMPT = 3        # this many recent summaries go into her pr
 OBSIDIAN_IDLE_SECONDS = 120          # notes are written once nobody has talked for this long
 OBSIDIAN_MIN_SCORE = 0.45            # how close a note must be to count for "what did I tell you about..."
 
+# Raziel Hub (hub_server.py): her deliverables, metrics and memory in your browser, on this PC only.
+# Open it with the "Raziel Hub" Desktop shortcut (it carries the key from %APPDATA%\Raziel\hub.token).
+HUB_ENABLED = True
+HUB_PORT = 8770
+DELIVERABLES_DIR = None              # None = the deliverables folder next to main.py
+
 # --- WhatsApp messaging -------------------------------------------------
 # Name (lowercase) -> phone number with country code, no spaces or dashes,
 # e.g. "+919876543210". We can't read your phone's contact list directly,

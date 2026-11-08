@@ -294,10 +294,24 @@ def build_briefing(now: Optional[datetime] = None) -> str:
         lines = {k: _end(v) for k, v in _collect(keys).items() if v}
         text = _fit(head, lines)
         logger.info("Briefing: built %d words (%s)", _words(text), ", ".join(lines) or "greeting only")
+        _publish(now, text, lines)
         return text
     except Exception as e:
         logger.warning("Briefing: build failed: %s", e, exc_info=True)
         return _t("failed")
+
+
+def _publish(now: datetime, text: str, lines: Dict[str, str]) -> None:
+    """The briefing as a report for the hub (deliverables.py): what she said, kept."""
+    try:
+        import deliverables
+        first = lines.get("weather") or next(iter(lines.values()), "") or text
+        deliverables.publish(
+            "briefing", f"{_daypart(now).replace('_', ' ').capitalize()} briefing", first,
+            being="time", kind="report", body=f"# Briefing, {now.strftime('%A %d %B %Y, %H:%M')}\n\n{text}\n",
+            metrics={"words": _words(text), "parts": list(lines)})
+    except Exception:  # noqa: BLE001
+        logger.debug("Briefing: couldn't save it for the hub", exc_info=True)
 
 
 def _give(now: Optional[datetime] = None) -> str:

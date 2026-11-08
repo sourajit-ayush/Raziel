@@ -570,6 +570,12 @@ def read_later(site_key: str, hwnd: int, prompt: str, before: Optional[str]) -> 
         if not answer:
             return
         text = " ".join(_answer_pieces(site, answer))
+        try:                                  # the whole answer, kept for the hub (deliverables.py)
+            import deliverables
+            deliverables.publish("ai-answer", f"{site}: {prompt[:80]}", text[:300], being="knowledge",
+                                 kind="answer", body=f"# {site}\n\n**You asked:** {prompt}\n\n{answer}\n")
+        except Exception:  # noqa: BLE001
+            logger.debug("AI answers: couldn't save the answer for the hub", exc_info=True)
         try:
             _announcer(text)
         except Exception:  # noqa: BLE001

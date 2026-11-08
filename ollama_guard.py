@@ -105,6 +105,13 @@ def ensure_running(wait: float = START_WAIT,
                     if up():
                         logger.info("Ollama is running.")
                         _last_attempt[0] = None
+                        try:
+                            import deliverables
+                            deliverables.publish("ollama-guard", "Ollama started",
+                                                 f"Ollama wasn't running, so Raziel started it ({os.path.basename(cmd[0])}).",
+                                                 being="nexus", kind="event")
+                        except Exception:  # noqa: BLE001
+                            pass
                         return True
             logger.warning("Started Ollama, but it didn't answer within %.0f s.", wait)
             return False

@@ -619,10 +619,19 @@ class Brain:
         def changed(full: bool):
             if not getattr(config, "GAME_UNLOAD_LLM", True):
                 return
+            import deliverables
             if full:
-                self.unload("a game / full-screen app is in front")
+                freed = self.unload("a game / full-screen app is in front")
+                deliverables.publish("game-mode", "Game mode: LLM unloaded",
+                                     f"A game or full-screen app is in front: {config.OLLAMA_MODEL} "
+                                     + ("was unloaded so the game gets its memory." if freed else
+                                        "couldn't be unloaded (Ollama didn't answer)."),
+                                     being="shield", kind="event")
             else:
                 logger.info("The game is gone - loading the LLM again.")
+                deliverables.publish("game-mode", "Game over: LLM loading again",
+                                     f"No game in front any more: {config.OLLAMA_MODEL} is loading in the background.",
+                                     being="shield", kind="event")
                 self.warm_up_async()
         quiet_mode.on_fullscreen(changed)
 
