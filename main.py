@@ -59,6 +59,10 @@ from tools import (
     TOOL_FUNCTIONS,
     find_file,
     match_quick_command,
+    try_auto_youtube_nth,
+    warm_up_app_index,
+)
+from instant_matchers import (
     try_auto_datetime,
     try_auto_ai_followup,
     try_auto_ai_send,
@@ -66,7 +70,6 @@ from tools import (
     try_auto_open_folder,
     try_auto_open_site_action,
     try_auto_type_into_ai_site,
-    try_auto_youtube_nth,
     try_auto_play_music,
     try_auto_queue_music,
     try_auto_whatsapp,
@@ -74,7 +77,6 @@ from tools import (
     try_auto_remember_favorite,
     try_auto_screenshot,
     try_auto_smalltalk,
-    warm_up_app_index,
 )
 from transcriber import Transcriber
 from wake_word import WakeWordDetector
@@ -336,6 +338,7 @@ DETERMINISTIC_MATCHERS = (
     ("ai-send", try_auto_ai_send, True),                     # "send it and read me the answer" (ChatGPT / Gemini in front)
     ("avatar-place", _lazy("avatar_place"), True),           # "make yourself bigger" / "move to the top left"
     ("universe", _lazy("universes"), True),                  # "show me the universe" / "who lives in your universe"
+    ("hub", _lazy("hub_server"), True),                      # "open the hub" (Raziel Hub in the browser)
     ("avatar-forms", _lazy("avatar_forms"), True),           # orb avatar: "become a dragon" / "roar" / "dance"
     ("ai-answer", _lazy("ai_answers"), True),                # "read it all" (the last AI chat answer, in full)
     ("quiet-mode", _lazy("quiet_mode"), True),               # "do not disturb" / "quiet mode off"
@@ -1215,6 +1218,11 @@ def run_voice_assistant(*_args):
             brain.tool_listener = universes.note_tools     # the tool she used -> that being's galaxy lights up
         except Exception:
             logger.exception("universes: couldn't listen to the brain's tools")
+        try:
+            import mcp_tools
+            mcp_tools.start()                # MCP servers (config.MCP_SERVERS), each in the background
+        except Exception:
+            logger.exception("Couldn't start the MCP servers (non-fatal)")
         if getattr(config, "LLM_WARMUP", True):
             try:
                 brain.warm_up_async()

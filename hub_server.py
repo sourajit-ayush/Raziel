@@ -433,7 +433,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass                       # the page was reloaded or closed mid-reply: nobody to answer
 
     def _json(self, code: int, data):
         self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
@@ -499,6 +502,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"ok": False, "reply": "That question is empty or too long."})
             return self._json(200, ask(text))
         return self._json(404, {"error": "not found"})
+
+
+# ================================================================== "open the hub"
+
+_OPEN_RE = re.compile(
+    r"^(?:(?:hey |ok |okay )?raziel,? )?(?:please )?(?:open|show|show me|launch|bring up|pull up)\s+"
+    r"(?:the |my |your |raziel(?:'s)? )*(?:raziel )?(?:hub|dashboard)(?: please)?$")
+_OPEN_HI_RE = re.compile(r"^(?:रज़ियल\s+|रजियल\s+)?(?:हब|डैशबोर्ड)\s+(?:खोलो|खोलिए|दिखाओ|दिखाइए)$")
+_T = {"opened": {"en": "Opening your hub.", "hi": "आपका हब खोल रही हूँ।"},
+      "off": {"en": "The hub is off. HUB_ENABLED in config.py turns it on.", "hi": "हब बंद है।"}}
+
+
+def try_handle(transcript: str) -> Optional[str]:
+    """main.py's matcher: "open the hub" / "show me my hub" / "हब खोलो" opens it in the browser."""
+    t = re.sub(r"[^\w\s'ऀ-ॿ]+", " ", (transcript or "").strip().lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    if not (_OPEN_RE.match(t) or _OPEN_HI_RE.match(t)):
+        return None
+    import lang
+    if _server is None:
+        return lang.tr(_T, "off")
+    import webbrowser
+    webbrowser.open(url())
+    logger.info("Hub: opened in the browser")
+    return lang.tr(_T, "opened")
 
 
 def start(ask_handler: Optional[Callable[[str], str]] = None) -> bool:

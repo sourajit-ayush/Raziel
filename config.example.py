@@ -97,6 +97,15 @@ PIPER_CONFIG_PATH = os.path.join(_SCRIPT_DIR, f"{PIPER_VOICE_NAME}.onnx.json")
 PIPER_LENGTH_SCALE = 1.15
 TTS_VOLUME = 1.0     # 0.0 to 1.0
 
+# Voice engine: "piper" (fast, a bit robotic) or "kokoro" (kokoro_tts.py: more natural, offline, ~0.5-1.5 s a
+# sentence on the CPU). Kokoro runs from its own venv-kokoro with models/kokoro/kokoro-v1.0.int8.onnx and
+# voices-v1.0.bin; when any of that is missing or fails, Piper speaks instead.
+TTS_ENGINE = "piper"
+KOKORO_VOICE = "bf_emma"             # British: bf_emma, bf_isabella, bf_alice, bf_lily; US: af_heart, af_bella ...
+KOKORO_SPEED = 1.0
+KOKORO_HINDI = False                 # True: Hindi with Kokoro too (KOKORO_HINDI_VOICE); False: Piper's Hindi voice
+KOKORO_HINDI_VOICE = "hf_alpha"
+
 # --- Avatar ------------------------------------------------------------------
 # Requires: pip install pywebview websockets
 AVATAR_ENABLED = True
@@ -223,6 +232,38 @@ CONFIRM_ACTIONS = ("send_whatsapp_message", "overwrite_file", "shutdown_pc", "re
 CONFIRM_TIMEOUT_SECONDS = 60
 CONFIRM_MAX_REPROMPTS = 1
 CONFIRM_KEEP_BACKUP_ON_OVERWRITE = True
+
+# --- MCP servers (mcp_tools.py) -------------------------------------------------
+# Every tool an MCP server offers becomes a tool she can use (mcp_<name>_<tool>). Anything the server
+# doesn't mark read-only is confirmed out loud first, like a WhatsApp message.
+#   command / args / env   how to start it (stdio). `npx -y` downloads the package the first time.
+#   label                  how she names it in a question: "Should I use GitHub to create issue...?"
+#   tools                  only these tools (recommended: each one makes every request longer)
+#   note                   added to every tool's description (e.g. which paths to use)
+#   root                   a folder: path arguments ("Documents\x", "C:\Users\<username>\Documents\x", "x")
+#                          are turned into paths inside it - small models get paths wrong a lot
+#   trusted                these tools run without the spoken yes/no even if they change things
+#   timeout                seconds per call (default 30); enabled = False keeps it off
+MCP_SERVERS = {
+    # "files": {
+    #     "command": "npx",
+    #     "args": ["-y", "@modelcontextprotocol/server-filesystem", r"C:\Users\YOU\Documents"],
+    #     "label": "your Documents",
+    #     "note": r"Paths are relative to the Documents folder: '.' is the folder itself, "
+    #             r"'Notes\todo.txt' is a file in it.",
+    #     "root": r"C:\Users\YOU\Documents",   # path arguments are put inside this folder
+    #     "cwd": r"C:\Users\YOU\Documents",
+    #     "tools": ["read_text_file", "list_directory", "search_files", "write_file"],
+    # },
+    # "github": {
+    #     "command": "npx",
+    #     "args": ["-y", "@modelcontextprotocol/server-github"],
+    #     "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "..."},
+    #     "label": "GitHub",
+    #     "tools": ["search_repositories", "list_issues", "create_issue"],
+    # },
+}
+MCP_MAX_TOOLS = 15           # all servers together
 
 # --- Email (Phase 3) ----------------------------------------------------------
 EMAIL_DRAFT_MODE = "gmail"   # "gmail" | "outlook" | "mailto"

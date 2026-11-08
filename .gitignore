@@ -33,6 +33,7 @@ models/
 
 # --- Python environment (regenerate with requirements.txt) ---
 venv/
+venv-kokoro/
 .venv/
 __pycache__/
 *.pyc
@@ -56,3 +57,4 @@ spotify_playlists.json
 gestures_debug.jsonl
 gestures_debug.old.jsonl
 folder_names.json
+mcp_tools_cache.json

@@ -59,7 +59,7 @@ _PAYLOAD_RE = re.compile(
 # (ai_sites.SITE_WORDS: "JetGPT", "chat gbt", "Jemini" - how Whisper writes them - count too.)
 _OPEN_SITE_RE = re.compile(r"^(?:open|launch|go to)\s+(?:the\s+)?(youtube|google|spotify|bing|wikipedia|amazon|"
                            rf"{ai_sites.SITE_WORDS})$", re.IGNORECASE)
-# "enter and read me the answer" / "press enter, then read it": one request (tools.try_auto_ai_send)
+# "enter and read me the answer" / "press enter, then read it": one request (instant_matchers.try_auto_ai_send)
 _SEND_READ_RE = re.compile(r"^(?:(?:ok|okay|now|please|so)[\s,]+)*(?:send|submit|press|hit|enter|peter|inter|center|"
                            r"entre|click send)\b.*\b(?:read|tell me)\b", re.IGNORECASE)
 # Parts that act on whatever window is in front. Once an earlier part has gone to the model (which

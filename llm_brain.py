@@ -708,6 +708,8 @@ class Brain:
         for i, name in enumerate(called_tool_names):
             if name in config.SLOW_PATH_TOOLS and not (i < len(finals) and finals[i]):
                 return True
+            if name.startswith("mcp_"):      # an MCP tool's raw data: the model reads it and answers
+                return True
         return False
 
     # ---------------------------------------------------------------- one turn

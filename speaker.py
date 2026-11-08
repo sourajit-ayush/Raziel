@@ -24,6 +24,7 @@ import io
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import urllib.request
@@ -102,6 +103,38 @@ def skip_current() -> bool:
         return False
     _skip.set()
     return True
+
+
+def _kokoro_on() -> bool:
+    try:
+        import kokoro_tts
+        return kokoro_tts.wanted()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_PHRASE_BREAK = re.compile(r"(?<=[,;:])\s+|\s+(?=[—–-]\s)|(?<=[.!?।])\s+")
+
+
+def phrases(text: str, min_chars: int = 24, max_chars: int = 110):
+    """A sentence as short phrases (at commas, semicolons, colons, dashes), for Kokoro: it takes about as
+    long to make speech as the speech lasts on this PC (2026-11-08: 4.8 s for 4.7 s), so she starts after
+    the first phrase and makes the next one while saying it. Pieces shorter than `min_chars` join their
+    neighbour (no two-word fragments); a piece longer than `max_chars` with no pause in it stays whole."""
+    text = (text or "").strip()
+    if len(text) <= min_chars * 2:
+        return [text] if text else []
+    parts = [p.strip() for p in _PHRASE_BREAK.split(text) if p and p.strip()]
+    out = []
+    for p in parts:
+        if out and (len(out[-1]) < min_chars or len(p) < min_chars // 2):
+            out[-1] = out[-1] + " " + p
+        else:
+            out.append(p)
+    if len(out) > 1 and len(out[-1]) < min_chars:
+        tail = out.pop()
+        out[-1] = out[-1] + " " + tail
+    return out or [text]
 
 
 def split_long(text: str, min_chars: int = 220):
@@ -279,15 +312,31 @@ class Speaker:
             self.hindi_voice, self.hindi_state = None, "failed"
             return self._synthesize_runs(self._voice_runs(text))
 
+    def _synth_run(self, key: str, chunk: str):
+        """One language's run of text: Kokoro when TTS_ENGINE = "kokoro" (Hindi only with KOKORO_HINDI),
+        Piper otherwise - and Piper whenever Kokoro has nothing (missing, crashed, too slow)."""
+        if key == "en" or getattr(config, "KOKORO_HINDI", False):
+            try:
+                import kokoro_tts
+                kokoro = kokoro_tts.client()
+                got = kokoro.synth(chunk, key) if kokoro is not None else None
+            except Exception:  # noqa: BLE001
+                logger.exception("Kokoro voice failed - Piper speaks this one")
+                got = None
+            if got is not None:
+                pcm, rate = got
+                return pcm, 1, 2, rate, []     # no phoneme timings from Kokoro: the mouth follows the level
+        return self._synth_raw(*(self._voice_for(key)), chunk)
+
     def _synthesize_runs(self, runs):
         if len(runs) == 1:
             key, chunk = runs[0]
-            return self._synth_raw(*(self._voice_for(key)), chunk)
+            return self._synth_run(key, chunk)
         # Mixed Hindi / English: synthesize each run with its own voice and join them.
         pcm_all, timeline, offset = b"", [], 0.0
         channels = width = rate = None
         for key, chunk in runs:
-            pcm, ch, w, r, tl = self._synth_raw(*(self._voice_for(key)), chunk)
+            pcm, ch, w, r, tl = self._synth_run(key, chunk)
             if rate is None:
                 channels, width, rate = ch, w, r
             elif r != rate:
@@ -425,6 +474,8 @@ class Speaker:
             text = "Acknowledged."
 
         pieces = split_long(text)
+        if pieces is None and _kokoro_on() and len(phrases(text)) > 1:
+            pieces = [text]          # Kokoro: phrase by phrase (the stream splits it), so she starts sooner
         if pieces is not None:
             # A long text (the morning briefing, a long answer): spoken piece by piece - the first is heard
             # sooner, and a swipe down can skip ahead to the next one. Barge-in works the same.
@@ -535,6 +586,8 @@ class Speaker:
         text_q = queue.Queue()     # sentences waiting to be synthesized
         audio_q = queue.Queue()    # (sentence, synthesized audio) waiting to be played
 
+        split = _kokoro_on()
+
         def producer():
             produced = 0
             try:
@@ -542,9 +595,19 @@ class Speaker:
                     if stop_event.is_set():
                         break
                     piece = (piece or "").strip()
-                    if piece:
+                    if not piece:
+                        continue
+                    must_hear = False
+                    if protect is not None:
+                        try:
+                            must_hear = bool(protect(piece))
+                        except Exception:  # noqa: BLE001
+                            must_hear = False
+                    # Kokoro: phrase by phrase. A yes/no question stays whole - split up, its parts
+                    # wouldn't be recognised as the question she must finish asking.
+                    for part in (phrases(piece) if split and not must_hear else [piece]):
                         produced += 1
-                        text_q.put(piece)
+                        text_q.put(part)
             except Exception:
                 logger.exception("Generating the reply failed")
                 if not produced:

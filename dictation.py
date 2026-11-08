@@ -485,7 +485,7 @@ def _self_check() -> Optional[str]:
     return None
 
 
-# The last one-shot "type ..." text: "send it and read me the answer" (tools.try_auto_ai_send) uses it to
+# The last one-shot "type ..." text: "send it and read me the answer" (instant_matchers.try_auto_ai_send) uses it to
 # find the answer below your question on the ChatGPT / Gemini page.
 last_typed = {"text": "", "at": 0.0}
 
