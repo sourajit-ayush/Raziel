@@ -283,6 +283,10 @@ class Transcriber:
         except Exception as e:
             logger.warning("Language detection failed (%s) - assuming %s.", e, self.last_language)
             return self.last_language
+        return self._decide_language(probs, duration_s)
+
+    def _decide_language(self, probs: dict, duration_s: float = 0.0) -> str:
+        """'en' or 'hi' from Whisper's language probabilities; only those two count."""
         en_p, hi_p = probs.get("en", 0.0), probs.get("hi", 0.0)
         need = float(getattr(config, "HINDI_MIN_PROBABILITY", 0.6))
         if self.last_language == "hi":
@@ -369,19 +373,20 @@ class Transcriber:
             except Exception as e:  # never let the guard itself break transcription
                 logger.warning("Audio pre-check failed (%s) - transcribing anyway.", e)
 
-        language = self._choose_language(wav_path, getattr(stats, "duration_s", 0.0) if stats else 0.0)
-        model = self.model
-        if language == "hi":
-            model = self._hindi() or self.model
-        vocabulary_prompt = _build_vocabulary_prompt() if language == "en" else ""
-        started = time.time()
-        segments, _info = model.transcribe(
-            wav_path,
+        duration = getattr(stats, "duration_s", 0.0) if stats else 0.0
+        mode = self._language_mode()
+        if not self._hindi_wanted() or mode == "en":
+            language = "en"
+        elif mode == "hi":
+            language = "hi"
+        else:
+            # "auto": English or Hindi is read from the transcription pass itself. A separate check used to
+            # run Whisper's encoder once more just for that (2.4 s a turn on a quiet PC, 11 s on a busy one).
+            language = None
+        options = dict(
             beam_size=4,
-            language=language,
             vad_filter=False,
             condition_on_previous_text=False,
-            initial_prompt=vocabulary_prompt or None,
             # Whisper's own silence/loop defences, stated explicitly so they
             # can't silently change with a library upgrade.
             no_speech_threshold=0.6,
@@ -391,6 +396,24 @@ class Transcriber:
             # passes on a noisy clip (a song behind you: 30 s for 11 s of audio). Three is plenty.
             temperature=_temperatures(),
         )
+        model = (self._hindi() if language == "hi" else None) or self.model
+        vocabulary_prompt = _build_vocabulary_prompt() if language != "hi" else ""
+        started = time.time()
+        # `segments` is a lazy generator: nothing is decoded until it is read, so a pass that turns out
+        # to be in the wrong language costs only the language detection.
+        segments, info = model.transcribe(wav_path, language=language,
+                                          initial_prompt=vocabulary_prompt or None, **options)
+        if language is None:
+            probs = dict(getattr(info, "all_language_probs", None) or ())
+            if not probs:
+                probs = {info.language: info.language_probability or 0.0}
+            language = self._decide_language(probs, duration)
+            if language == "hi":
+                vocabulary_prompt = ""
+                segments, _info = (self._hindi() or self.model).transcribe(wav_path, language="hi", **options)
+            elif info.language != "en":
+                segments, _info = self.model.transcribe(wav_path, language="en",
+                                                        initial_prompt=vocabulary_prompt or None, **options)
 
         # `segments` is a lazy generator - consume it exactly once.
         segments = list(segments)

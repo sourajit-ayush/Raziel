@@ -172,6 +172,11 @@ OLLAMA_NUM_CTX = 10240
 LLM_WARMUP = True
 LLM_STREAMING = True
 OLLAMA_KEEP_ALIVE = "4h"
+# A game / full-screen app in front: the LLM is unloaded so the game gets its memory (16 GB can't hold a
+# game and an 8B model - everything else was paged to disk and replies took minutes). A question asked
+# meanwhile loads it again (10-25 s) and keeps it this long; when the game is gone it loads by itself.
+GAME_UNLOAD_LLM = True
+GAME_LLM_KEEP_ALIVE = "2m"
 
 # --- Conversation session (Phase 2) ------------------------------------------
 SLEEP_PHRASES = ["goodbye", "go to sleep", "go back to sleep", "अलविदा", "गुडबाय", "गुड बाय", "सो जाओ", "सो जाइए"]

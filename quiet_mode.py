@@ -224,6 +224,7 @@ class QuietMode:
         self.app = ""                     # the app using the mic, in a call
         self.manual = False
         self.override_until = -1e9       # "you can talk again" during a game/call: ignore it for a while
+        self.fullscreen = False          # a game / full-screen app is in front (even in a call, or overridden)
         self._last_seen = {"game": -1e9, "call": -1e9}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -248,11 +249,18 @@ class QuietMode:
                 in_call = True
             if full:
                 in_game = True
+            was_full, self.fullscreen = self.fullscreen, in_game
             if t < self.override_until:
                 in_call = in_game = False
             new = "call" if in_call else "game" if in_game else "dnd" if self.manual else ""
             old = self.mode
             self.mode = new
+        if self.fullscreen != was_full:
+            for listener in list(_fullscreen_listeners):
+                try:
+                    listener(self.fullscreen)
+                except Exception:  # noqa: BLE001
+                    logger.exception("quiet_mode: full-screen listener failed")
         if new != old:
             logger.info("Quiet mode: %s -> %s%s", old or "off", new or "off", f" ({self.app})" if new == "call" else "")
             if self._on_change is not None:
@@ -295,6 +303,17 @@ _state: Optional[QuietMode] = None
 
 
 _told_apps: set = set()
+_fullscreen_listeners: List[Callable[[bool], None]] = []
+
+
+def on_fullscreen(listener: Callable[[bool], None]) -> None:
+    """`listener(True)` when a game / full-screen app comes to the front, `listener(False)` when it is gone
+    (from the quiet-mode thread). main.py lets go of the LLM's memory meanwhile."""
+    _fullscreen_listeners.append(listener)
+
+
+def fullscreen() -> bool:
+    return bool(_state is not None and _state.fullscreen)
 
 
 def _changed(old: str, new: str):

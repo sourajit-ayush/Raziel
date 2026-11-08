@@ -210,6 +210,46 @@ class DictationLanguageTests(unittest.TestCase):
         load.assert_called_once()
 
 
+class SpokenTurnLanguageTests(unittest.TestCase):
+    """transcribe() (a spoken turn): English or Hindi is read from the transcription pass itself, and
+    only a pass in the wrong language is run again."""
+
+    def _run(self, model, hindi_model=None, duration=3.0, last="en"):
+        import transcriber
+        t = transcriber.Transcriber.__new__(transcriber.Transcriber)
+        t.model, t.hindi_model, t.last_language, t._prev_language = model, hindi_model, last, last
+        stats = mock.Mock(duration_s=duration)
+        with mock.patch.object(transcriber.config, "GUARD_ENABLED", True, create=True), \
+             mock.patch.object(transcriber.transcript_guard, "load_wav", return_value=([], 16000)), \
+             mock.patch.object(transcriber.transcript_guard, "check_audio", return_value=(True, stats, "")), \
+             mock.patch.object(transcriber.transcript_guard, "check_segments",
+                               side_effect=lambda segs, **kw: mock.Mock(ok=True, text=" ".join(s.text for s in segs))), \
+             mock.patch.object(transcriber, "_build_vocabulary_prompt", return_value=""), \
+             mock.patch.object(t, "_language_mode", return_value="auto"), \
+             mock.patch.object(t, "_hindi_wanted", return_value=True), \
+             mock.patch.object(t, "_language_probs", side_effect=AssertionError("no separate language check")):
+            return t.transcribe("x.wav"), t.last_language
+
+    def test_english_takes_one_pass(self):
+        model = _Model("en", {"en": 0.9, "hi": 0.05})
+        self.assertEqual(self._run(model), ("small:en", "en"))
+        self.assertEqual(model.calls, [None])
+
+    def test_english_mistaken_for_urdu_is_run_again_in_english(self):
+        model = _Model("ur", {"ur": 0.5, "en": 0.3, "hi": 0.2})
+        self.assertEqual(self._run(model), ("small:en", "en"))
+        self.assertEqual(model.calls, [None, "en"])
+
+    def test_clear_hindi_goes_to_the_hindi_model(self):
+        model, hindi = _Model("hi", {"hi": 0.9, "en": 0.05}), _Model("hi", {"hi": 1.0}, name="big")
+        self.assertEqual(self._run(model, hindi), ("big:hi", "hi"))
+
+    def test_a_hindi_conversation_stays_hindi_on_a_mixed_sentence(self):
+        # last sentence was Hindi, this one is in between: stays Hindi (as before)
+        model, hindi = _Model("hi", {"hi": 0.45, "en": 0.45}), _Model("hi", {"hi": 1.0}, name="big")
+        self.assertEqual(self._run(model, hindi, last="hi"), ("big:hi", "hi"))
+
+
 class HindiModelMemoryTests(unittest.TestCase):
     def _transcriber(self):
         import transcriber

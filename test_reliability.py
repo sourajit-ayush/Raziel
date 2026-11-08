@@ -145,6 +145,81 @@ class AskAgainOnceStarted(unittest.TestCase):
         self.assertEqual(client.chat.call_count, 1)
 
 
+class GameFreesTheLLM(unittest.TestCase):
+    """A game in front: quiet_mode reports it, the LLM is unloaded, and it is loaded again afterwards."""
+
+    def _quiet(self, full, mics=()):
+        import quiet_mode
+        clock = [0.0]
+        q = quiet_mode.QuietMode(fullscreen=lambda: full[0], mics=lambda: list(mics), now=lambda: clock[0])
+        return quiet_mode, q, clock
+
+    def test_listeners_hear_a_game_come_and_go(self):
+        full = [False]
+        quiet_mode, q, clock = self._quiet(full)
+        heard = []
+        with mock.patch.object(quiet_mode, "_fullscreen_listeners", [heard.append]):
+            q.poll()
+            full[0] = True
+            q.poll()
+            q.poll()                                    # still in the game: no second call
+            full[0] = False
+            clock[0] = 1.0
+            q.poll()                                    # just left: game mode lingers a little
+            clock[0] = 1.0 + quiet_mode.EXIT_AFTER_SECONDS + 1
+            q.poll()
+        self.assertEqual(heard, [True, False])
+
+    def test_a_call_during_a_game_still_counts_as_the_game(self):
+        full = [True]
+        quiet_mode, q, _clock = self._quiet(full, mics=["Discord.exe"])
+        heard = []
+        with mock.patch.object(quiet_mode, "_fullscreen_listeners", [heard.append]):
+            q.poll()
+        self.assertEqual(q.mode, "call")
+        self.assertEqual(heard, [True])
+
+    def test_keep_alive_is_short_while_gaming(self):
+        import llm_brain
+        with mock.patch.object(llm_brain.config, "OLLAMA_KEEP_ALIVE", "4h"), \
+             mock.patch.object(llm_brain.config, "GAME_LLM_KEEP_ALIVE", "2m", create=True), \
+             mock.patch.object(llm_brain.config, "GAME_UNLOAD_LLM", True, create=True), \
+             mock.patch("quiet_mode.fullscreen", return_value=True):
+            self.assertEqual(llm_brain.keep_alive(), "2m")
+        with mock.patch.object(llm_brain.config, "OLLAMA_KEEP_ALIVE", "4h"), \
+             mock.patch("quiet_mode.fullscreen", return_value=False):
+            self.assertEqual(llm_brain.keep_alive(), "4h")
+        with mock.patch.object(llm_brain.config, "OLLAMA_KEEP_ALIVE", "4h"), \
+             mock.patch.object(llm_brain.config, "GAME_UNLOAD_LLM", False, create=True), \
+             mock.patch("quiet_mode.fullscreen", return_value=True):
+            self.assertEqual(llm_brain.keep_alive(), "4h")
+
+    def test_no_warm_up_while_a_game_is_in_front(self):
+        import llm_brain
+        brain = llm_brain.Brain.__new__(llm_brain.Brain)
+        brain.client = mock.Mock()
+        with mock.patch.object(llm_brain.ollama_guard, "ensure_running", return_value=True), \
+             mock.patch("quiet_mode.fullscreen", return_value=False), \
+             mock.patch("quiet_mode.fullscreen_now", return_value=True):
+            brain.warm_up()
+        brain.client.chat.assert_not_called()
+
+    def test_unloaded_for_the_game_and_loaded_after(self):
+        import llm_brain
+        import quiet_mode
+        brain = llm_brain.Brain.__new__(llm_brain.Brain)
+        brain.client = mock.Mock()
+        listeners = []
+        with mock.patch.object(quiet_mode, "_fullscreen_listeners", listeners), \
+             mock.patch.object(brain, "warm_up_async") as warm:
+            brain.follow_games()
+            listeners[0](True)
+            brain.client.generate.assert_called_once_with(model=llm_brain.config.OLLAMA_MODEL, keep_alive=0)
+            warm.assert_not_called()
+            listeners[0](False)
+            warm.assert_called_once()
+
+
 class RotatingLog(unittest.TestCase):
     def test_log_starts_over_at_the_size_limit(self):
         import main

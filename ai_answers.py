@@ -286,7 +286,7 @@ def summarise(text: str) -> Optional[str]:
                 {"role": "user", "content": text[:6000]},
             ],
             options={"num_predict": 220, "num_ctx": int(_cfg("OLLAMA_NUM_CTX", 8192))},
-            keep_alive=_cfg("OLLAMA_KEEP_ALIVE", "4h"),
+            keep_alive=__import__("llm_brain").keep_alive(),
         )
         try:
             resp = client.chat(think=False, **kwargs)

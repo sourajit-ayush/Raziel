@@ -1217,6 +1217,10 @@ def run_voice_assistant(*_args):
                 brain.warm_up_async()
             except Exception:
                 logger.exception("Couldn't start the LLM warm-up (non-fatal)")
+        try:
+            brain.follow_games()             # a game in front: the LLM's memory goes to the game meanwhile
+        except Exception:
+            logger.exception("Couldn't follow games for the LLM (non-fatal)")
 
         wake_detector = WakeWordDetector()
         transcriber = Transcriber()

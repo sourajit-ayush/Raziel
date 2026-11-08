@@ -24,6 +24,27 @@ from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 
 logger = logging.getLogger("voice_assistant")
 
+
+def _game_frees_llm() -> bool:
+    """A game / full-screen app is in front and GAME_UNLOAD_LLM is on. 16 GB can't hold a game and the
+    8B model at once: on 2026-11-08 (VALORANT running, 0.7 GB free) Windows paged everything to disk and
+    "what's today's date" took minutes."""
+    if not getattr(config, "GAME_UNLOAD_LLM", True):
+        return False
+    try:
+        import quiet_mode
+        return quiet_mode.fullscreen()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def keep_alive():
+    """How long Ollama keeps the model in memory after a request: OLLAMA_KEEP_ALIVE, or only
+    GAME_LLM_KEEP_ALIVE while a game is in front (a question mid-game, then the memory goes back)."""
+    if _game_frees_llm():
+        return getattr(config, "GAME_LLM_KEEP_ALIVE", "2m")
+    return config.OLLAMA_KEEP_ALIVE
+
 # Safety net: some Ollama chat templates put reasoning directly in the
 # visible content as <think>...</think> instead of the separate 'thinking'
 # field. Strip it so it's never read aloud.
@@ -524,6 +545,14 @@ class Brain:
         no conversation state.
         """
         ollama_guard.ensure_running()        # after a reboot Raziel may start before Ollama does
+        if getattr(config, "GAME_UNLOAD_LLM", True):
+            try:
+                import quiet_mode
+                if quiet_mode.fullscreen() or quiet_mode.fullscreen_now():
+                    logger.info("A game / full-screen app is in front - the LLM loads when it is needed.")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
         started = time.time()
         logger.info("Warming up the language model (loading %s into memory)...",
                     config.OLLAMA_MODEL)
@@ -536,7 +565,7 @@ class Brain:
                 tools=TOOL_SCHEMAS,
                 think=config.OLLAMA_ENABLE_THINKING,
                 options=options,
-                keep_alive=config.OLLAMA_KEEP_ALIVE,
+                keep_alive=keep_alive(),
             )
             self._log_timing(response, "warm-up", started)
             logger.info("Language model ready (%.1fs).", time.time() - started)
@@ -548,6 +577,34 @@ class Brain:
         thread = threading.Thread(target=self.warm_up, name="llm-warmup", daemon=True)
         thread.start()
         return thread
+
+    def unload(self, reason: str = "") -> bool:
+        """Asks Ollama to let go of the model now (its memory goes back to Windows). The next request
+        loads it again (about 10-25 s)."""
+        try:
+            self.client.generate(model=config.OLLAMA_MODEL, keep_alive=0)
+            logger.info("LLM unloaded%s - its memory is free until it is needed again.",
+                        f" ({reason})" if reason else "")
+            return True
+        except Exception as e:  # noqa: BLE001 - Ollama not running: nothing loaded to free anyway
+            logger.info("Couldn't unload the LLM (%s)", e)
+            return False
+
+    def follow_games(self):
+        """While a game / full-screen app is in front, the model is unloaded (and a question asked meanwhile
+        keeps it only GAME_LLM_KEEP_ALIVE); when the game is gone it is loaded again in the background, so
+        the next question is quick again. GAME_UNLOAD_LLM = False turns this off."""
+        import quiet_mode
+
+        def changed(full: bool):
+            if not getattr(config, "GAME_UNLOAD_LLM", True):
+                return
+            if full:
+                self.unload("a game / full-screen app is in front")
+            else:
+                logger.info("The game is gone - loading the LLM again.")
+                self.warm_up_async()
+        quiet_mode.on_fullscreen(changed)
 
     # ------------------------------------------------------------ tool running
 
@@ -689,7 +746,7 @@ class Brain:
                 **({"tools": getattr(self, "_turn_schemas", TOOL_SCHEMAS)} if getattr(self, "_turn_tools", True) else {}),
                 think=config.OLLAMA_ENABLE_THINKING,
                 options=self._chat_options(),
-                keep_alive=config.OLLAMA_KEEP_ALIVE,
+                keep_alive=keep_alive(),
             )
         except Exception as e:
             # Ollama not running (closed, or not started yet after a reboot): start it and ask once more.
@@ -754,7 +811,7 @@ class Brain:
                 messages=self.messages,
                 think=config.OLLAMA_ENABLE_THINKING,
                 options=self._chat_options(),
-                keep_alive=config.OLLAMA_KEEP_ALIVE,
+                keep_alive=keep_alive(),
             )
         except Exception as e:
             logger.error("Ollama follow-up request failed: %s", e)
@@ -780,7 +837,7 @@ class Brain:
             messages=self.messages,
             think=config.OLLAMA_ENABLE_THINKING,
             options=self._chat_options(),
-            keep_alive=config.OLLAMA_KEEP_ALIVE,
+            keep_alive=keep_alive(),
             stream=True,
         )
         if use_tools and getattr(self, "_turn_tools", True):
