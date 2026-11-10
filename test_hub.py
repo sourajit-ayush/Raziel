@@ -136,6 +136,31 @@ class Server(_Temp):
         self.assertIn("script-src 'self'", r.getheader("Content-Security-Policy"))
         self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
 
+    def test_the_universe_script_and_the_pulse(self):
+        r, data = self.req("GET", "/universe.js", token=False)
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"const Universe", data)
+        self.assertIn("javascript", r.getheader("Content-Type"))
+        r, _ = self.req("GET", "/api/pulse", token=False)
+        self.assertEqual(r.status, 403)
+        with mock.patch("universes.active", return_value="forge"):
+            r, data = self.req("GET", "/api/pulse")
+        p = json.loads(data)
+        self.assertEqual(p["active"], "forge")
+        self.assertIn(p["state"], ("idle", "listening", "thinking", "speaking", "unknown"))
+
+    def test_the_page_uses_only_its_own_files(self):
+        # the policy allows no inline script or style and nothing from another site: the page must not need any
+        for name in ("index.html", "app.js", "universe.js", "app.css"):
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub", name), encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn("https://", text.replace("http://www.w3.org/", ""), name)
+            self.assertNotIn("innerHTML", text, name)
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub", "index.html"), encoding="utf-8") as f:
+            page = f.read()
+        self.assertNotIn(" style=", page)
+        self.assertNotIn("<style", page)
+
     def test_the_api_needs_the_token(self):
         r, _ = self.req("GET", "/api/overview", token=False)
         self.assertEqual(r.status, 403)

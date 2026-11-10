@@ -287,6 +287,11 @@ def turn_being() -> Optional[str]:
     return _state["turn"]
 
 
+def active() -> Optional[str]:
+    """The being the camera is on: the one named, or the one whose matcher / tool did the work (the Hub)."""
+    return _state["focus"] or _state["turn"]
+
+
 def end_turn():
     """The spoken turn is over: a phone command or an announcement after it is nobody's being."""
     with _lock:

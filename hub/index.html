@@ -5,14 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Raziel Hub</title>
 <link rel="stylesheet" href="app.css">
+<script src="universe.js" defer></script>
 <script src="app.js" defer></script>
 </head>
-<body>
-<header class="top">
-  <div class="brand">
-    <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><circle cx="15" cy="15" r="13" fill="none" stroke="#FFB84D" stroke-width="2"></circle><circle cx="15" cy="15" r="5" fill="#FFB84D"></circle></svg>
-    <span>Raziel Hub</span>
-  </div>
+<body data-state="unknown">
+<div class="sky" aria-hidden="true">
+  <div class="blob one"></div><div class="blob two"></div><div class="blob three"></div>
+  <canvas id="stars"></canvas>
+</div>
+
+<header class="top glass">
+  <div class="brand">Raziel Hub</div>
   <nav class="tabs" aria-label="Views" id="tabs"></nav>
   <form class="askbar" id="askform">
     <label for="ask" class="sr">Ask Raziel</label>
@@ -24,15 +27,27 @@
 <main class="wrap">
   <div id="notice" class="card notice" role="status" hidden></div>
 
-  <section class="hero" aria-label="Raziel's universe">
-    <div class="mapcol"><div class="map" id="map"></div></div>
-    <div class="focus">
+  <section class="stage" id="stage" aria-label="Raziel's universe">
+    <canvas id="scene" aria-hidden="true"></canvas>
+    <p class="tag" id="tag">Everything runs through <b>her</b>.</p>
+    <div id="gals"></div>
+    <div class="inside" id="inside" hidden>
+      <div class="ring"><svg viewBox="0 0 100 100" aria-hidden="true" id="ticks"></svg><span id="glyph"></span></div>
+      <div class="iname" id="iname"></div>
+      <div class="isub" id="isub"></div>
+    </div>
+    <div id="nodes" aria-hidden="true"></div>
+    <button class="back" id="back" hidden>Back to the universe</button>
+  </section>
+
+  <section class="focus glass" aria-live="polite">
+    <div class="focustext">
       <div class="label" id="kicker"></div>
       <h1 id="heading">Raziel Hub</h1>
       <p class="muted lead" id="blurb"></p>
       <div class="pills" id="helpers"></div>
-      <div class="stats" id="stats"></div>
     </div>
+    <div class="stats" id="stats"></div>
   </section>
 
   <div class="cols">
@@ -47,15 +62,15 @@
     </section>
 
     <aside class="side">
-      <section class="card pad">
+      <section class="card glass pad">
         <h2 class="h3">Vitals</h2>
         <div id="vitals"></div>
       </section>
-      <section class="card pad">
+      <section class="card glass pad">
         <div class="spread"><h2 class="h3">What she knows</h2><span class="muted small" id="factsrc"></span></div>
         <div id="facts"></div>
       </section>
-      <section class="card pad">
+      <section class="card glass pad">
         <h2 class="h3">This conversation</h2>
         <div id="chat" class="chat"></div>
       </section>

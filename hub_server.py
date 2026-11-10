@@ -38,7 +38,8 @@ logger = logging.getLogger("voice_assistant")
 
 HOST = "127.0.0.1"
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/index.html": ("index.html", "text/html; charset=utf-8"),
-          "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/app.css": ("app.css", "text/css; charset=utf-8")}
+          "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/app.css": ("app.css", "text/css; charset=utf-8"),
+          "/universe.js": ("universe.js", "text/javascript; charset=utf-8")}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 MAX_BODY = 8192
@@ -104,7 +105,7 @@ def _beings() -> List[dict]:
     except Exception:  # noqa: BLE001
         return []
     return [{"key": b["key"], "name": b["name"], "title": b["title"], "role": b["role"], "color": b["color"],
-             "glyph": b["glyph"], "helpers": list(b.get("helpers") or [])[:5]} for b in out]
+             "glyph": b["glyph"], "helpers": list(b.get("helpers") or [])[:6]} for b in out]
 
 
 def _read_json(path: str):
@@ -332,6 +333,28 @@ def overview() -> dict:
     }
 
 
+def pulse() -> dict:
+    """What changes from second to second, cheap enough to ask for often: her state (idle | listening |
+    thinking | speaking), the quiet mode, and the being that is working (its galaxy flares on the page)."""
+    state, mode, active = "unknown", "", None
+    try:
+        import avatar_server
+        state = avatar_server.current_state()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import quiet_mode
+        mode = quiet_mode.mode()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import universes
+        active = universes.active()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"state": state, "mode": mode, "active": active}
+
+
 def metrics() -> dict:
     return {"days": daily_transcribe(), "turns": list(reversed(deliverables.turns(30)))}
 
@@ -463,6 +486,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         q = {k: v[0] for k, v in parse_qs(query).items()}
         try:
+            if path == "/api/pulse":
+                return self._json(200, pulse())
             if path == "/api/overview":
                 return self._json(200, overview())
             if path == "/api/items":
@@ -479,17 +504,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        try:
+            length = max(0, int(self.headers.get("Content-Length") or 0))
+        except ValueError:
+            length = 0
+        # The body is read before anything is refused: answering with it still unread makes Windows
+        # reset the connection, and the caller sees a dropped connection instead of the refusal.
+        raw = self.rfile.read(min(length, MAX_BODY)) if length else b""
+        if length > MAX_BODY:
+            self.close_connection = True
+            return self._json(413, {"error": "too big"})
         if not self._host_ok():
             return self._deny(421)
         if not (self._origin_ok() and self._token_ok()):
             return self._deny()
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self._json(415, {"error": "json only"})
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
-            return self._json(413, {"error": "too big"})
         try:
-            data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            data = json.loads(raw.decode("utf-8") or "{}")
         except ValueError:
             return self._json(400, {"error": "bad json"})
         if not isinstance(data, dict):

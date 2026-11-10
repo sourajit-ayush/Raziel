@@ -34,8 +34,7 @@ async function api(path, body) {
 // ------------------------------------------------------------------ tiny DOM helper
 
 function h(tag, props, ...kids) {
-  const el = tag === "svg" || ["circle", "line"].includes(tag)
-    ? document.createElementNS("http://www.w3.org/2000/svg", tag) : document.createElement(tag);
+  const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k === "class") el.setAttribute("class", v);
@@ -78,36 +77,26 @@ const STATE_TEXT = { idle: "Listening for her name", listening: "Listening to yo
 function beings() { return (state.overview && state.overview.beings) || []; }
 function being(key) { return beings().find((b) => b.key === key) || { key, name: key, title: "", color: "#FFB84D", helpers: [] }; }
 
+// The map itself is universe.js (the galaxies on the canvas). Here: what it is told.
 function renderMap() {
-  const map = clear($("map"));
-  const ring = beings().filter((b) => b.key !== "nexus");
-  const pos = ring.map((b, i) => {
-    const a = (-90 + i * 360 / ring.length) * Math.PI / 180;
-    return { b, x: 50 + 38 * Math.cos(a), y: 50 + 38 * Math.sin(a) };
-  });
-  const svg = h("svg", { class: "orbits", viewBox: "0 0 100 100", "aria-hidden": "true" },
-    h("circle", { cx: 50, cy: 50, r: 38, fill: "none", stroke: "#1E2240", "stroke-width": 0.4, "stroke-dasharray": "1 1.4" }),
-    h("circle", { cx: 50, cy: 50, r: 24, fill: "none", stroke: "#1A1D36", "stroke-width": 0.3 }),
-    pos.map(({ b, x, y }) => h("line", { x1: 50, y1: 50, x2: x.toFixed(1), y2: y.toFixed(1), stroke: b.color,
-      "stroke-width": state.focus === b.key ? 0.8 : 0.3, "stroke-opacity": state.focus === b.key ? 0.9 : 0.35 })));
-  map.append(svg);
-  const st = (state.overview && state.overview.state) || "unknown";
-  const nexus = being("nexus");
-  map.append(h("button", { class: "being nexus", "aria-pressed": String(state.focus === "nexus"),
-      "aria-label": "Raziel, the Nexus: everything", style: { left: "50%", top: "50%" },
-      onclick: () => setFocus("nexus") },
-    h("span", { class: "core " + st, text: nexus.glyph || "核" }),
-    h("span", { class: "name", text: nexus.name || "Raziel" }),
-    h("span", { class: "sub", text: STATE_TEXT[st] || st })));
-  for (const { b, x, y } of pos) {
-    const on = state.focus === b.key;
-    map.append(h("button", { class: "being", "aria-pressed": String(on), "aria-label": `${b.name}, ${b.title}`,
-        style: { left: x.toFixed(1) + "%", top: y.toFixed(1) + "%" },
-        onclick: () => setFocus(on ? "nexus" : b.key) },
-      h("span", { class: "disc", text: b.glyph, style: { color: b.color, borderColor: on ? b.color : "" } }),
-      h("span", { text: b.name }),
-      h("span", { class: "sub", text: b.role })));
-  }
+  Universe.setBeings(beings());
+  Universe.setFocus(state.focus);
+  renderPulse();
+}
+
+// Her state tints the sky and sets how fast the galaxies turn; the being that is working flares.
+function renderPulse() {
+  const p = state.pulse || state.overview || {};
+  const st = state.asking && (!p.state || p.state === "idle" || p.state === "sleeping") ? "thinking" : (p.state || "unknown");
+  document.body.dataset.state = st === "idle" ? "listening" : st;
+  Universe.setState(st, STATE_TEXT[st] || st);
+  Universe.setActive(st === "thinking" || st === "speaking" ? (p.active || null) : null);
+}
+
+async function refreshPulse() {
+  if (document.hidden) return;
+  try { state.pulse = await api("/api/pulse"); } catch (e) { return; }
+  renderPulse();
 }
 
 function renderFocus() {
@@ -305,23 +294,25 @@ async function onAsk(ev) {
   $("askbtn").disabled = true;
   input.value = "";
   state.chat.push({ you: true, text }, { you: false, text: "…" });
-  renderSide();
+  renderSide(); renderPulse();
   let reply = "Couldn't reach Raziel.";
   try { reply = (await api("/api/ask", { text })).reply || reply; } catch (e) { /* keep the message */ }
   state.chat[state.chat.length - 1] = { you: false, text: reply };
   state.asking = false;
   $("askbtn").disabled = false;
-  renderSide();
+  renderSide(); renderPulse();
   refreshItems();
 }
 
 function boot() {
   token();
+  Universe.init({ onSelect: setFocus });
   renderTabs();
   $("askform").addEventListener("submit", onAsk);
   $("readerclose").addEventListener("click", () => $("reader").close());
   refreshOverview().then(refreshItems);
   setInterval(refreshOverview, 3000);
+  setInterval(refreshPulse, 700);
   setInterval(refreshItems, 15000);
 }
 document.addEventListener("DOMContentLoaded", boot);
