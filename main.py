@@ -47,6 +47,7 @@ import avatar_server
 import avatar_window
 import config
 import confirmation
+import early_transcribe
 import initiative
 import instance_guard
 import lang
@@ -943,6 +944,9 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
     addressed = True
     said_didnt_catch = False   # "Sorry, I didn't catch that" is said once; then she stays quiet (the TV...)
     last_asked = False         # her last reply was a question (its answer may be a word like "Brazil")
+    follow_until = 0.0         # until then, what you say next is a follow-up: for her, no name needed
+    cut = None                 # the reply you (or a noise) cut off: {"rest", "complete", "at", "auto"}
+    early = early_transcribe.EarlyTranscriber(transcriber)   # Whisper starts at your first pause
 
     while not shutdown.is_shutting_down():
         if pending_pre_roll is None:
@@ -971,18 +975,23 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
                 _media_unduck("nothing said")
                 addressed = False
                 continue
+            if not addressed and not with_music and time.monotonic() < follow_until:
+                # You answered within a few seconds of her reply: a conversation, not a new call.
+                addressed = True
+                logger.info("Follow-up to her reply - treated as said to her.")
 
         # She is being spoken to: hold proactive speech off until the whole
         # turn (record -> transcribe -> route -> speak) is finished.
         _engine("set_busy", True)
 
         wav_path = record_until_silence(
-            pa, pre_roll_frames=pending_pre_roll, ambient_level=current_ambient_level
+            pa, pre_roll_frames=pending_pre_roll, ambient_level=current_ambient_level, early=early
         )
         t_heard = time.monotonic()           # you stopped talking (turn timing, _log_turn_timing)
         pending_pre_roll = None
         current_ambient_level = None
         if shutdown.is_shutting_down():
+            early.cancel()
             return
         _voice_check(wav_path)               # "was that you?" - in the background, for risky actions
 
@@ -993,7 +1002,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         _media_call("touch")                 # (a long turn mustn't hit the "turned down too long" limit)
         _gestures_busy(True)
         try:
-            transcript = transcriber.transcribe(wav_path)
+            transcript = early.result(wav_path)      # (already under way since your first pause)
         finally:
             _gestures_busy(False)
         t_text = time.monotonic()
@@ -1013,6 +1022,30 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             elif said_didnt_catch:
                 addressed = False                    # asked once already: whatever this is, it isn't you
         if not transcript:
+            if cut and not cut["auto"] and time.monotonic() - cut["at"] < RESUME_AFTER_NOISE_SECONDS:
+                # She stopped for a sound that wasn't a sentence (a cough, a door, her own echo): she
+                # picks up where she was, once.
+                logger.info("Nothing was said after the interruption - she goes on with her reply.")
+                was_cut, cut = cut, None
+                try:
+                    _avatar_state("thinking")
+                    with _turn_lock:
+                        again = _resume_reply(was_cut, brain, "(continue)")
+                    interrupted, barge_in_pre_roll, reply = _speak_resumed(again, speaker, pa)
+                except Exception:
+                    logger.exception("Going on with the reply failed")
+                    interrupted, barge_in_pre_roll, reply = False, None, ""
+                logger.info("Reply (resumed): %s", reply)
+                _remember_reply(reply)
+                _engine("assistant_replied", reply)
+                if interrupted:
+                    pending_pre_roll = barge_in_pre_roll
+                    cut = _cut_from(speaker)
+                    if cut:
+                        cut["auto"] = True           # (only "go on" brings it back a second time)
+                elif (reply or "").strip():
+                    follow_until = time.monotonic() + _followup_seconds()
+                continue
             logger.info("No speech detected - still listening.")
             _engine("set_busy", False)   # a rejected/empty turn is not a real turn
             continue
@@ -1071,9 +1104,14 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         except Exception:
             pass
         _universe("begin_turn", being_key)
+        was_cut, cut = cut, None                 # (a new turn: the cut-off reply is only for "go on")
         try:
             with _turn_lock:
                 reply = confirmation_reply(transcript, brain, speaker.speak)
+                if reply is None and was_cut and is_resume_request(transcript) \
+                        and time.monotonic() - was_cut["at"] < RESUME_ON_REQUEST_SECONDS:
+                    logger.info("Asked to go on: she picks up the reply that was cut off.")
+                    reply = _resume_reply(was_cut, brain, transcript)
                 if reply is None:
                     reply = route_transcript(transcript, brain)
         except Exception:
@@ -1098,9 +1136,12 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
             # Streaming LLM reply: she starts talking after the first sentence. The generator runs its
             # tools and writes the brain's history while it is read, so it is read under _turn_lock too:
             # a notch / phone request (handle_phone_command) must not run in the middle of it.
+            # Called by name, answering her question, or following up: if the model needs a moment, she
+            # says "hmm" instead of leaving a silence. Not for words that may not be meant for her.
             with _turn_lock:
                 interrupted, barge_in_pre_roll, reply = speaker.speak_stream_interruptible(
-                    reply, pa, protect=confirmation.expects_answer)
+                    reply, pa, protect=confirmation.expects_answer,
+                    filler_after=_filler_delay() if was_addressed else None)
             logger.info("Reply: %s", reply)
         _log_turn_timing(t_heard, t_text, t_routed, transcript)
         if not (reply or "").strip() and not interrupted:
@@ -1115,6 +1156,7 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         elif (reply or "").strip():
             said_didnt_catch = False                 # a real answer: the next miss may be said again
         _universe("end_turn")                  # (a phone command after this is nobody's being)
+        had_pending = confirmation.has_pending()   # (a cut-off yes/no question is dropped, never resumed)
         # Arm a parked action only if its question was REALLY spoken (not cut off by
         # a barge-in or a failed reply), then start the user's time to answer.
         confirmation.settle(reply)
@@ -1131,11 +1173,75 @@ def run_awake_session(pa, transcriber, speaker, brain, wake_detector, pre_roll_f
         if interrupted:
             logger.info("User interrupted mid-reply, listening immediately.")
             pending_pre_roll = barge_in_pre_roll
+            cut = None if had_pending else _cut_from(speaker)    # what she didn't get to say
         elif last_asked:
             addressed = True             # she asked you something: your answer doesn't need her name
         else:
             addressed = False
             _media_unduck("answered")    # the music comes back up; while it plays she waits for her name
+        if not interrupted and (reply or "").strip():
+            follow_until = time.monotonic() + _followup_seconds()
+
+
+# ---------------------------------------------------------------- talking like a person
+RESUME_AFTER_NOISE_SECONDS = 20.0     # a sound cut her off and nothing was said: she goes on (once)
+RESUME_ON_REQUEST_SECONDS = 90.0      # "go on" / "you were saying" brings the cut-off reply back
+_RESUME_LEAD = {"lead": {"en": "As I was saying,", "hi": "जैसा मैं कह रही थी,"}}
+_RESUME_RE = re.compile(
+    r"^(?:sorry |okay |ok |yeah |yes |no |raziel )*(?:please )?"
+    r"(?:go on|go ahead|continue|carry on|keep going|you were saying|what were you saying|as you were saying|"
+    r"finish (?:that|it|what you were saying))(?: please)?$")
+_RESUME_HI = ("आगे बोलो", "आगे बोलिए", "बोलती रहो", "जारी रखो", "जारी रखिए", "क्या कह रही थी", "क्या कह रही थीं")
+
+
+def is_resume_request(transcript: str) -> bool:
+    """ "Go on", "sorry, continue", "what were you saying?" - said after cutting her off."""
+    text = re.sub(r"[^\w\sऀ-ॿ']", " ", (transcript or "").lower())
+    text = " ".join(text.split())
+    return bool(_RESUME_RE.match(text)) or any(p in text for p in _RESUME_HI)
+
+
+def _followup_seconds() -> float:
+    return float(getattr(config, "FOLLOWUP_SECONDS", 20))
+
+
+def _filler_delay():
+    if not getattr(config, "THINKING_FILLER", True):
+        return None
+    return float(getattr(config, "THINKING_FILLER_DELAY", 0.9))
+
+
+def _cut_from(speaker):
+    """What she was saying when she was cut off (speaker.last_interruption), or None."""
+    info = getattr(speaker, "last_interruption", None)
+    if not isinstance(info, dict):
+        return None
+    rest = [r.strip() for r in info.get("rest") or [] if isinstance(r, str) and r.strip()]
+    if not rest:
+        return None
+    return {"rest": rest, "complete": bool(info.get("complete")), "at": time.monotonic(), "auto": False}
+
+
+def _resume_reply(was_cut: dict, brain, said: str):
+    """The rest of a reply that was cut off: a str when all of it already existed (a briefing, a finished
+    answer), otherwise the model goes on writing it (it stopped writing when she was interrupted)."""
+    if was_cut["complete"]:
+        return lang.tr(_RESUME_LEAD, "lead") + " " + " ".join(was_cut["rest"])
+    prompt = ("(You were interrupted while answering and stopped mid-sentence. Go on with that answer now: "
+              f"begin with the sentence you were cut off in - \"{was_cut['rest'][0]}\" - and finish what was "
+              "left. Do not repeat anything you said before that sentence and do not mention the interruption.)")
+    if getattr(config, "LLM_STREAMING", True):
+        return brain.stream_turn(said, prompt, allow_tools=False)
+    return brain.process_turn(said, prompt, allow_tools=False)
+
+
+def _speak_resumed(reply, speaker, pa):
+    """Speaks a resumed reply. Returns (interrupted, pre_roll, spoken text)."""
+    if isinstance(reply, str):
+        interrupted, pre_roll = speaker.speak_interruptible(reply, pa)
+        return interrupted, pre_roll, reply
+    with _turn_lock:
+        return speaker.speak_stream_interruptible(reply, pa)
 
 
 def _log_turn_timing(t_heard: float, t_text: float, t_routed: float, said: str = ""):
@@ -1241,6 +1347,10 @@ def run_voice_assistant(*_args):
         wake_detector = WakeWordDetector()
         transcriber = Transcriber()
         speaker = Speaker()
+        try:
+            speaker.prepare_fillers()        # "Hmm." / "Let me see." made once, in the background
+        except Exception:
+            logger.exception("Couldn't prepare the thinking sounds (non-fatal)")
         pa = pyaudio.PyAudio()
 
         # Pay Get-StartApps' 2-3 s PowerShell cost now, in the background,

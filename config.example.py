@@ -106,6 +106,16 @@ KOKORO_SPEED = 1.0
 KOKORO_HINDI = False                 # True: Hindi with Kokoro too (KOKORO_HINDI_VOICE); False: Piper's Hindi voice
 KOKORO_HINDI_VOICE = "hf_alpha"
 
+# --- Talking like a person (all optional; these are the defaults) -----------------
+EARLY_TRANSCRIBE = True              # Whisper starts at your first pause instead of when the recording ends
+EARLY_TRANSCRIBE_AFTER = 0.4         # seconds of quiet that count as that pause (below SILENCE_DURATION)
+THINKING_FILLER = True               # "Hmm." / "Let me see." when the model needs a moment (only when she
+THINKING_FILLER_DELAY = 0.9          #   was called, asked something, or you are following up); seconds of silence first
+# THINKING_FILLERS = {"en": ("Hmm.", "Let me see."), "hi": ("हम्म।",)}   # your own
+FOLLOWUP_SECONDS = 20                # this long after her reply, what you say next is taken as said to her
+CONVERSATION_QUESTIONS = True        # she asks one short question when a request is unclear, and now and then
+                                     #   about something you told her (False: never asks back)
+
 # --- Avatar ------------------------------------------------------------------
 # Requires: pip install pywebview websockets
 AVATAR_ENABLED = True

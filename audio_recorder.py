@@ -241,7 +241,15 @@ def wait_for_voice(pa: pyaudio.PyAudio, timeout: float = None, stop_when=None, v
         _close(stream)
 
 
-def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_level=None) -> str:
+def _tell(early, what: str, *args):
+    """The head-start transcriber must never break a recording."""
+    try:
+        getattr(early, what)(*args)
+    except Exception:  # noqa: BLE001
+        logger.exception("Early transcription (%s) failed (non-fatal)", what)
+
+
+def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_level=None, early=None) -> str:
     """
     Records audio starting immediately, stops after sustained silence
     or after config.RECORD_MAX_SECONDS. Returns the path to a saved wav file.
@@ -256,6 +264,10 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
     room you're actually in right now. Falls back to the static
     SILENCE_RMS_THRESHOLD when not provided (e.g. the very first turn after
     a wake word, which doesn't go through wait_for_voice).
+
+    early: optional early_transcribe.EarlyTranscriber. It is told when you go quiet for a moment
+    (early.pause(frames so far): Whisper starts then, not when the recording ends) and when you go on
+    talking after such a pause (early.resume()).
     """
     frames = list(pre_roll_frames) if pre_roll_frames else []
     try:
@@ -274,6 +286,16 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
     silence_chunks_needed = int(config.SILENCE_DURATION * chunks_per_second)
     min_chunks_before_stop = int(config.MIN_RECORD_SECONDS * chunks_per_second)
     max_chunks = int(config.RECORD_MAX_SECONDS * chunks_per_second)
+    early_chunks, paused = 0, False
+    if early is not None:
+        try:
+            import early_transcribe
+            if early_transcribe.enabled():
+                early_chunks = max(1, int(round(early_transcribe.pause_seconds() * chunks_per_second)))
+        except Exception:  # noqa: BLE001
+            early_chunks = 0
+        if early_chunks >= silence_chunks_needed:
+            early_chunks = 0                       # no head start to be had
 
     logger.info("Recording started... (silence threshold: %.0f)", silence_threshold)
 
@@ -292,6 +314,13 @@ def record_until_silence(pa: pyaudio.PyAudio, pre_roll_frames=None, ambient_leve
             silent_chunks += 1
         else:
             silent_chunks = 0
+            if paused:
+                paused = False
+                _tell(early, "resume")
+
+        if early_chunks and not paused and silent_chunks == early_chunks and i >= min_chunks_before_stop:
+            paused = True
+            _tell(early, "pause", list(frames))
 
         if i >= min_chunks_before_stop and silent_chunks >= silence_chunks_needed:
             logger.info("Silence detected, stopping recording.")

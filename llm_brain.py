@@ -72,7 +72,8 @@ _UNTRUSTED_REFUSAL = {"msg": {
 # half-heard command - or a claim that it did something without calling any tool ("Understood. Playing
 # music." for "any music"). Neither may be spoken as if something happened.
 # "(nothing)": what the persona asks for when the words aren't a request for her.
-_NOTHING_SENTENCE_RE = re.compile(r"^\W*(?:\(?\s*nothing\s*\)?|\(?\s*no reply\s*\)?)\W*$", re.IGNORECASE)
+# ("(none)" is what qwen3:8b often writes for it; a bare "None." can be a real answer, so only in brackets)
+_NOTHING_SENTENCE_RE = re.compile(r"^\W*(?:\(?\s*nothing\s*\)?|\(?\s*no reply\s*\)?|\(\s*none\s*\))\W*$", re.IGNORECASE)
 # The old persona's stock acknowledgements, still in the model's habits: said to background talk and to
 # commands it then didn't carry out ("lock my laptop" -> "Understood."). Asked once more what it meant.
 _ACK_SENTENCE_RE = re.compile(
@@ -289,6 +290,29 @@ BASE_SYSTEM_PROMPT = (
     "and briefly."
 )
 
+# Asking back, like a person would (CONVERSATION_QUESTIONS in config.py; on by default). Kept apart from the
+# prompt above so it can be switched off. Her question keeps the microphone "hers": main.py treats the next
+# thing you say as the answer (_asks_back), so no name is needed.
+CONVERSATION_RULES = (
+    "\n\n"
+    "QUESTIONS: when the user is clearly talking to you but the request is missing something you need "
+    "(which file, which person, which day, what the message should say) or could mean two different "
+    "things, ask ONE short question ending in a question mark - such as 'What should the message say?' "
+    "or 'Which folder?' - instead of filling in the missing piece yourself or replying (nothing). When "
+    "they answer, carry it out. This is only for requests with a piece missing: a plain question of "
+    "fact is answered directly, as before. "
+    "When the user tells you about something in their own life - an exam, a trip, being tired, a plan - "
+    "you may end your reply with one short question about something they have not told you yet. At "
+    "most one question in a reply, never in two replies in a row, and never after simply carrying out a "
+    "command."
+)
+
+
+def system_prompt() -> str:
+    if getattr(config, "CONVERSATION_QUESTIONS", True):
+        return BASE_SYSTEM_PROMPT + CONVERSATION_RULES
+    return BASE_SYSTEM_PROMPT
+
 
 # --- streaming helpers ---------------------------------------------------------
 
@@ -446,7 +470,7 @@ class Brain:
             logger.exception("Obsidian memory: couldn't read the vault - using memory.db")
         if facts is None:
             facts = memory.get_recent_facts(limit=config.MAX_REMEMBERED_FACTS_IN_PROMPT)
-        prompt = BASE_SYSTEM_PROMPT
+        prompt = system_prompt()
         if facts:
             facts_block = "\n".join(f"- {f}" for f in facts)
             prompt += (

@@ -24,6 +24,7 @@ import io
 import logging
 import os
 import queue
+import random
 import re
 import threading
 import time
@@ -381,14 +382,57 @@ class Speaker:
 
         return pcm_data, n_channels, sample_width, frame_rate, viseme_timeline
 
-    def _play(self, text: str, stop_event=None, prepared=None, skippable=True):
+    # ------------------------------------------------------------------ thinking sounds
+    # A person who needs a moment says "hmm": when the model hasn't produced its first sentence after
+    # THINKING_FILLER_DELAY seconds, she says one of these (made once, in the background, so it costs no
+    # synthesis time when it is needed). It is not part of the reply: not in the transcript, not timed as
+    # her "first sound", and it can't be talked over (it is under a second).
+    DEFAULT_FILLERS = {"en": ("Hmm.", "Let me see.", "One moment.", "Let me check."),
+                       "hi": ("हम्म।", "एक सेकंड।", "देखती हूँ।")}
+
+    def prepare_fillers(self, code: str = "en"):
+        if not getattr(config, "THINKING_FILLER", True):
+            return
+        store = self.__dict__.setdefault("_fillers", {})
+        if code in store:
+            return
+        store[code] = ready = []
+        texts = (getattr(config, "THINKING_FILLERS", None) or self.DEFAULT_FILLERS).get(code) or ()
+
+        def work():
+            for text in texts:
+                try:
+                    ready.append((text, self._synthesize(text)))
+                except Exception:  # noqa: BLE001
+                    logger.exception("Couldn't prepare the thinking sound %r (non-fatal)", text)
+            logger.info("Thinking sounds ready (%s): %d", code, len(ready))
+        threading.Thread(target=work, name="filler-prepare", daemon=True).start()
+
+    def _pick_filler(self):
+        """(text, audio) of a prepared thinking sound in the language of this turn, or None."""
+        if not getattr(config, "THINKING_FILLER", True):
+            return None
+        code = "hi" if lang.is_hindi() else "en"
+        ready = (getattr(self, "_fillers", None) or {}).get(code)
+        if ready is None:
+            self.prepare_fillers(code)           # (first Hindi turn: ready for the next one)
+            return None
+        if not ready:
+            return None
+        last = getattr(self, "_last_filler", None)
+        pick = random.choice([f for f in ready if f[0] != last] or list(ready))
+        self._last_filler = pick[0]
+        return pick
+
+    def _play(self, text: str, stop_event=None, prepared=None, skippable=True, count=True):
         """Synthesizes and plays text, checking stop_event between chunks for interruptibility.
         `prepared` is an already-synthesized _synthesize() result (streaming replies
-        synthesize the NEXT sentence while the current one is still playing)."""
+        synthesize the NEXT sentence while the current one is still playing).
+        `count=False`: not the start of her answer (a thinking sound) for the turn timing."""
         with self._play_lock:
-            self._play_locked(text, stop_event, prepared, skippable)
+            self._play_locked(text, stop_event, prepared, skippable, count)
 
-    def _play_locked(self, text: str, stop_event=None, prepared=None, skippable=True):
+    def _play_locked(self, text: str, stop_event=None, prepared=None, skippable=True, count=True):
         pcm_data, n_channels, sample_width, frame_rate, viseme_timeline = (
             prepared if prepared is not None else self._synthesize(text)
         )
@@ -419,7 +463,8 @@ class Speaker:
             if ec is not None:
                 ec.playback_started()
             _playing.set()
-            _play_starts.append(time.monotonic())
+            if count:
+                _play_starts.append(time.monotonic())
             for i in range(0, len(pcm_data), chunk_size):
                 if stop_event is not None and stop_event.is_set():
                     break
@@ -479,13 +524,27 @@ class Speaker:
         if pieces is not None:
             # A long text (the morning briefing, a long answer): spoken piece by piece - the first is heard
             # sooner, and a swipe down can skip ahead to the next one. Barge-in works the same.
-            interrupted, pre_roll, _spoken = self.speak_stream_interruptible(iter(pieces), pa)
+            pulled = []
+
+            def known():
+                for piece in pieces:
+                    pulled.append(piece)
+                    yield piece
+            interrupted, pre_roll, _spoken = self.speak_stream_interruptible(known(), pa)
+            cut = getattr(self, "last_interruption", None)
+            if interrupted and cut is not None:
+                cut["rest"] += pieces[len(pulled):]     # the pieces she never got to: all of it is known
+                cut["complete"] = True
             return interrupted, pre_roll
 
         logger.info("Speaking (interruptible): %s", text)
+        self.last_interruption = None
         _reply_started()
         try:
-            return self._speak_interruptible(text, pa)
+            interrupted, pre_roll = self._speak_interruptible(text, pa)
+            if interrupted:
+                self.last_interruption = {"rest": [text], "complete": True}
+            return interrupted, pre_roll
         finally:
             _reply_ended()
 
@@ -549,15 +608,18 @@ class Speaker:
             _log_mic_peak(raw_peak, peak, threshold, ec)
         return interrupted["value"], (list(pre_roll) if interrupted["value"] else None)
 
-    def speak_stream_interruptible(self, pieces, pa: pyaudio.PyAudio, protect=None):
-        """Speaks a streamed reply (see _speak_stream). Returns (interrupted, pre_roll_frames, spoken_text)."""
+    def speak_stream_interruptible(self, pieces, pa: pyaudio.PyAudio, protect=None, filler_after=None):
+        """Speaks a streamed reply (see _speak_stream). Returns (interrupted, pre_roll_frames, spoken_text).
+        After an interruption, `last_interruption` = {"rest": the sentence she was cut off in and the ones
+        after it that already existed, "complete": True if that is the whole rest of the reply}."""
+        self.last_interruption = None
         _reply_started()
         try:
-            return self._speak_stream(pieces, pa, protect)
+            return self._speak_stream(pieces, pa, protect, filler_after)
         finally:
             _reply_ended()
 
-    def _speak_stream(self, pieces, pa: pyaudio.PyAudio, protect=None):
+    def _speak_stream(self, pieces, pa: pyaudio.PyAudio, protect=None, filler_after=None):
         """
         Speaks a reply that is still being WRITTEN: `pieces` is a generator of
         sentences (Brain.stream_turn()). Three stages run concurrently, so the
@@ -587,6 +649,8 @@ class Speaker:
         audio_q = queue.Queue()    # (sentence, synthesized audio) waiting to be played
 
         split = _kokoro_on()
+        unplayed_audio, unplayed_text = [], []     # after a barge-in: what existed but was never said
+        whole = {"value": False}                   # the generator ran to its end (nothing left unwritten)
 
         def producer():
             produced = 0
@@ -608,6 +672,8 @@ class Speaker:
                     for part in (phrases(piece) if split and not must_hear else [piece]):
                         produced += 1
                         text_q.put(part)
+                else:
+                    whole["value"] = True
             except Exception:
                 logger.exception("Generating the reply failed")
                 if not produced:
@@ -628,6 +694,7 @@ class Speaker:
                     audio_q.put(DONE)
                     return
                 if stop_event.is_set():
+                    unplayed_text.append(item)
                     continue             # keep draining until DONE
                 try:
                     audio_q.put((item, self._synthesize(item)))
@@ -635,11 +702,28 @@ class Speaker:
                     logger.exception("Speech synthesis failed for: %s", item)
 
         def player():
+            first = True
             while True:
-                item = audio_q.get()
+                if first and filler_after is not None:
+                    # Still thinking after `filler_after` seconds: a short "hmm" instead of silence.
+                    try:
+                        item = audio_q.get(timeout=filler_after)
+                    except queue.Empty:
+                        pick = self._pick_filler()
+                        if pick is not None and not stop_event.is_set():
+                            logger.info("Thinking sound: %s", pick[0])
+                            try:
+                                self._play(pick[0], stop_event, pick[1], skippable=False, count=False)
+                            except Exception:
+                                logger.exception("Thinking sound failed (non-fatal)")
+                        item = audio_q.get()
+                else:
+                    item = audio_q.get()
+                first = False
                 if item is DONE:
                     return
                 if stop_event.is_set():
+                    unplayed_audio.append(item[0])
                     continue
                 text, prepared = item
                 logger.info("Speaking: %s", text)
@@ -739,6 +823,11 @@ class Speaker:
         # Make sure the LLM generator has been closed (and its history
         # bookkeeping done) BEFORE the next turn starts using the same Brain.
         threads[0].join(timeout=6)
+        if interrupted["value"]:
+            threads[1].join(timeout=2)        # (so the lists below are complete)
+            play_thread.join(timeout=1)
+            self.last_interruption = {"rest": spoken[-1:] + unplayed_audio + unplayed_text,
+                                      "complete": whole["value"]}
 
         return (
             interrupted["value"],
