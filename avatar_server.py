@@ -258,7 +258,9 @@ async def _on_message(websocket, raw, state: Dict[str, bool]) -> None:
 async def _run_request(kind: str, args: tuple) -> tuple:
     handler = _handlers.get(kind)
     if handler is None:
-        return False, "Raziel can't do that right now."
+        # main.py sets the handlers once she is online, after the models load (a minute or two
+        # after a start), while the socket already takes the token: a request in between lands here.
+        return False, "I'm still starting up. Ask me again in a moment."
     loop = asyncio.get_running_loop()
     try:
         answer = await asyncio.wait_for(loop.run_in_executor(None, handler, *args), REQUEST_TIMEOUT)

@@ -173,6 +173,12 @@ class RequestChannel(unittest.TestCase):
         ])
         self.assertEqual([g["ok"] for g in got[1:]], [False, False])
 
+    def test_before_she_is_online_it_says_so(self):
+        with mock.patch.dict(avatar_server._handlers, clear=True):
+            got = self.run_client([{"type": "hello", "token": self.token},
+                                   {"type": "ask", "id": "7", "text": "what time is it"}])
+        self.assertEqual((got[1]["ok"], got[1]["text"]), (False, "I'm still starting up. Ask me again in a moment."))
+
     def test_a_failing_handler_still_answers(self):
         with mock.patch.dict(avatar_server._handlers, {"look": lambda: 1 / 0}):
             got = self.run_client([{"type": "hello", "token": self.token}, {"type": "look", "id": "9"}])
