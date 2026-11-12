@@ -93,7 +93,8 @@ class RequestChannel(unittest.TestCase):
         cls.port_patch = mock.patch.object(avatar_server, "PORT", cls.port)
         cls.port_patch.start()
         avatar_server.set_request_handlers(ask=lambda text: f"you asked: {text}",
-                                           look=lambda: "a text editor")
+                                           look=lambda: "a text editor",
+                                           say=lambda text: f"said: {text}")
         assert avatar_server.start()
         with open(avatar_server.token_path(), encoding="ascii") as f:
             cls.token = f.read()
@@ -137,6 +138,20 @@ class RequestChannel(unittest.TestCase):
         self.assertEqual(got[0], {"type": "hello_ok"})
         self.assertEqual(got[1], {"type": "reply", "id": "1", "ok": True, "text": "you asked: what time is it"})
         self.assertEqual(got[2], {"type": "reply", "id": "2", "ok": True, "text": "a text editor"})
+
+    def test_say_after_hello(self):
+        got = self.run_client([
+            {"type": "hello", "token": self.token},
+            {"type": "say", "id": "3", "text": "It's 5 pm."},
+            {"type": "say", "id": "4", "text": "  "},
+            {"type": "say", "id": "5", "text": "x" * 1001},
+        ])
+        self.assertEqual(got[1], {"type": "reply", "id": "3", "ok": True, "text": "said: It's 5 pm."})
+        self.assertEqual([g["ok"] for g in got[2:]], [False, False])
+
+    def test_saying_without_hello_is_closed(self):
+        got = self.run_client([{"type": "say", "id": "1", "text": "hello"}])
+        self.assertEqual(got, [("closed", 4001)])
 
     def test_wrong_token_is_closed(self):
         got = self.run_client([{"type": "hello", "token": "nope"}])
@@ -188,6 +203,19 @@ class BusyRequest(unittest.TestCase):
              mock.patch.object(main, "_remember_reply"), mock.patch.object(main, "_engine"):
             self.assertEqual(main.handle_phone_command(object(), "open notepad", lock_timeout=0.1),
                              "Opened Notepad.")
+        self.assertFalse(main._turn_lock.locked())
+
+    def test_saying_waits_for_a_turn_and_releases_the_lock(self):
+        import main
+        with mock.patch.object(main, "announce_unprompted") as announce:
+            main._turn_lock.acquire()
+            try:
+                self.assertEqual(main.say_for_notch(object(), "hi", lock_timeout=0.1), main._say("busy"))
+            finally:
+                main._turn_lock.release()
+            announce.assert_not_called()
+            self.assertEqual(main.say_for_notch("spk", "hi", lock_timeout=0.1), "Done.")
+            announce.assert_called_once_with("spk", "hi")
         self.assertFalse(main._turn_lock.locked())
 
 

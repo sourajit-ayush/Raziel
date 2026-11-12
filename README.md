@@ -385,6 +385,7 @@ The picture is the matching Wikipedia article's main image, at most 320 px and a
 3. Then:
    - `{"type": "ask", "id": "1", "text": "what's on my calendar"}` runs the text exactly like something you said, through the same yes/no confirmation for anything risky. She answers `{"type": "reply", "id": "1", "ok": true, "text": "..."}` without speaking.
    - `{"type": "look", "id": "2"}`: she looks at the window in front (only that window, downscaled, with the local vision model) and replies the same way. The first look after she starts can take about a minute while the vision model loads; after that about 6 s.
+   - `{"type": "say", "id": "3", "text": "It's 5 pm."}`: she says the text out loud as it is (up to 1000 characters), for the 🔊 button on her answers in the notch's Chat tab. It waits for a spoken turn to finish (45 s at most), and in quiet mode it becomes a pop-up, as reminders do. She replies `{"type": "reply", "id": "3", "ok": true, "text": "Done."}` once she has finished.
 
 One request at a time, the same as talking to her; each gives up after 120 s with `"ok": false`.
 

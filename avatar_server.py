@@ -30,11 +30,11 @@ Orb avatar (avatar_orb.html) only - the 3D avatar simply ignores these:
 
 Requests from Companion Deck's notch (README "Companion Deck's notch"):
 
-    avatar_server.set_request_handlers(ask=fn(text) -> str, look=fn() -> str)
+    avatar_server.set_request_handlers(ask=fn(text) -> str, look=fn() -> str, say=fn(text) -> str)
 
 A client that sends {"type": "hello", "token": ...} with the token from token_path() (written
-fresh at every start) may then send {"type": "ask", "id", "text"} and {"type": "look", "id"};
-each is answered with {"type": "reply", "id", "ok", "text"}. A connection from a web page (it
+fresh at every start) may then send {"type": "ask", "id", "text"}, {"type": "look", "id"} and
+{"type": "say", "id", "text"} (the notch's Chat tab: say one of her answers out loud); each is answered with {"type": "reply", "id", "ok", "text"}. A connection from a web page (it
 has an Origin header) never gets that far. Everyone still receives the broadcasts.
 """
 
@@ -122,6 +122,7 @@ REQUEST_TIMEOUT = 120.0
 # starts later; what is left is for the command itself.
 REQUEST_LOCK_WAIT = 45.0
 MAX_ASK_CHARS = 500
+MAX_SAY_CHARS = 1000
 _token: Optional[str] = None
 _handlers: Dict[str, Callable[..., Any]] = {}
 
@@ -186,12 +187,16 @@ def _write_token() -> None:
 
 
 def set_request_handlers(ask: Optional[Callable[[str], Any]] = None,
-                         look: Optional[Callable[[], Any]] = None) -> None:
-    """main.py: what answers `ask` (text, like something said) and `look` (the window in front)."""
+                         look: Optional[Callable[[], Any]] = None,
+                         say: Optional[Callable[[str], Any]] = None) -> None:
+    """main.py: what answers `ask` (text, like something said), `look` (the window in front) and
+    `say` (text she speaks out loud as it is, without thinking about it)."""
     if ask is not None:
         _handlers["ask"] = ask
     if look is not None:
         _handlers["look"] = look
+    if say is not None:
+        _handlers["say"] = say
 
 
 def _origin(websocket) -> Optional[str]:
@@ -223,7 +228,7 @@ async def _on_message(websocket, raw, state: Dict[str, bool]) -> None:
         else:
             await websocket.close(4001, "not allowed")
         return
-    if kind not in ("ask", "look"):
+    if kind not in ("ask", "look", "say"):
         return  # the avatar page's plain hello, or anything unknown
     if not state.get("authed"):
         await websocket.close(4001, "not allowed")
@@ -237,6 +242,13 @@ async def _on_message(websocket, raw, state: Dict[str, bool]) -> None:
         if not isinstance(text, str) or not 0 < len(text.strip()) <= MAX_ASK_CHARS:
             await websocket.send(json.dumps({"type": "reply", "id": rid, "ok": False,
                                              "text": "That question is empty or too long."}))
+            return
+        args = (text.strip(),)
+    elif kind == "say":
+        text = msg.get("text")
+        if not isinstance(text, str) or not 0 < len(text.strip()) <= MAX_SAY_CHARS:
+            await websocket.send(json.dumps({"type": "reply", "id": rid, "ok": False,
+                                             "text": "Nothing to say, or too long."}))
             return
         args = (text.strip(),)
     ok, answer = await _run_request(kind, args)

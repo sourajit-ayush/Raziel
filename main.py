@@ -813,6 +813,19 @@ def handle_phone_command(brain, transcript: str, lock_timeout: float = None) -> 
         _turn_lock.release()
 
 
+def say_for_notch(speaker, text: str, lock_timeout: float) -> str:
+    """The notch's Chat tab: say one of her own typed answers out loud (its speaker button). Runs
+    under _turn_lock like a spoken turn, so it never talks over one; gives up if she is still busy
+    after `lock_timeout`. Quiet mode turns it into a pop-up, as for reminders."""
+    if not _turn_lock.acquire(timeout=lock_timeout):
+        return _say("busy")
+    try:
+        announce_unprompted(speaker, text)
+    finally:
+        _turn_lock.release()
+    return "Done."
+
+
 def handle_phone_notification(speaker, app: str, title: str, text: str) -> None:
     """Called when the phone forwards a notification (phone_bridge.py's /notification endpoint,
     fed by a Tasker profile on the phone) - read out loud the same way a due reminder is
@@ -1386,6 +1399,7 @@ def run_voice_assistant(*_args):
             avatar_server.set_request_handlers(
                 ask=lambda text: handle_phone_command(brain, text, lock_timeout=avatar_server.REQUEST_LOCK_WAIT),
                 look=lambda: __import__("vision").describe_window(),
+                say=lambda text: say_for_notch(speaker, text, avatar_server.REQUEST_LOCK_WAIT),
             )
         try:
             # Raziel Hub (hub_server.py): her deliverables, metrics and memory in the browser, on this PC only.
