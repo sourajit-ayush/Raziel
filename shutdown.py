@@ -56,6 +56,12 @@ from typing import Callable, List
 os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
 os.environ.setdefault("FOR_IGNORE_EXCEPTIONS", "1")
 
+# OpenBLAS (inside numpy, and a second copy inside scipy) sets aside about 30 MB per CPU thread the
+# moment it is imported: about 0.7 GB of committed memory on 12 threads, measured 2026-11-12, for work
+# she never does (her numpy use is small arrays; Whisper and Piper bring their own maths libraries and
+# are just as fast with this set). It has to be in place before the first numpy import, hence here.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 # ---------------------------------------------------------------- state
 
 _SHUTDOWN = threading.Event()
