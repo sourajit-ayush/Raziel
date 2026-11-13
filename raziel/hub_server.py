@@ -475,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in STATIC:
             name, ctype = STATIC[path]
             try:
-                with open(os.path.join(_here(), "hub", name), "rb") as f:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub", name), "rb") as f:
                     body = f.read()
             except OSError:
                 return self._json(404, {"error": "missing"})

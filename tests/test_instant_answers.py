@@ -7,6 +7,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_instant_answers -v
 Nothing is opened for real: the app / folder openers and the browser are stand-ins.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import unittest
 from datetime import datetime
 from unittest import mock

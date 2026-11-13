@@ -7,7 +7,7 @@ console need another home:
 
 * ONE copy at a time. main.py holds a named Windows mutex (MUTEX_NAME) for as long as it runs.
   A second copy - the "Start Raziel" shortcut double-clicked while she's already running, or
-  `python main.py` typed out of habit - sees it and exits instead of starting a second listener
+  `python raziel/main.py` typed out of habit - sees it and exits instead of starting a second listener
   that would hear "Raziel" and answer every question twice.
 * A way to stop her without Ctrl+C. main.py waits on a named event (STOP_EVENT_NAME) in a
   background thread; stop_raziel.pyw (the "Stop Raziel" shortcut) sets it, and main.py then takes

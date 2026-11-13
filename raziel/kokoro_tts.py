@@ -40,7 +40,7 @@ def paths() -> Tuple[str, str, str, str]:
     """(python in venv-kokoro, worker script, model, voices)."""
     here = _here()
     return (os.path.join(here, "venv-kokoro", "Scripts", "python.exe"),
-            os.path.join(here, "kokoro_worker.py"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "kokoro_worker.py"),
             _cfg("KOKORO_MODEL", os.path.join(here, "models", "kokoro", "kokoro-v1.0.int8.onnx")),
             _cfg("KOKORO_VOICES", os.path.join(here, "models", "kokoro", "voices-v1.0.bin")))
 

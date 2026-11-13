@@ -10,6 +10,6 @@ if not exist "venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-"venv\Scripts\python.exe" launcher.py install
+"venv\Scripts\python.exe" raziel\launcher.py install
 echo.
 pause

@@ -6,7 +6,7 @@ Run by the "Raziel Hub" Desktop shortcut made by install_autostart.bat. All the 
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "raziel"))
 
 try:
     import launcher

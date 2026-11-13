@@ -136,7 +136,7 @@ def _ignored_exe(name: str) -> bool:
     extra = {str(x).lower() for x in _cfg("QUIET_MIC_IGNORE", ())}
     if exe in _SELF_EXES or exe in extra:
         return True
-    here = os.path.dirname(os.path.abspath(__file__)).lower()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).lower()      # the project folder (her venvs)
     return path.startswith(here)
 
 

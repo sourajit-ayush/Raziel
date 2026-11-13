@@ -5,6 +5,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_hub -v
 A temporary deliverables folder, token, vault and memory.db; the server runs on a spare local port.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import http.client
 import json
 import os
@@ -152,11 +156,11 @@ class Server(_Temp):
     def test_the_page_uses_only_its_own_files(self):
         # the policy allows no inline script or style and nothing from another site: the page must not need any
         for name in ("index.html", "app.js", "universe.js", "app.css"):
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub", name), encoding="utf-8") as f:
+            with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "raziel", "hub", name), encoding="utf-8") as f:
                 text = f.read()
             self.assertNotIn("https://", text.replace("http://www.w3.org/", ""), name)
             self.assertNotIn("innerHTML", text, name)
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub", "index.html"), encoding="utf-8") as f:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "raziel", "hub", "index.html"), encoding="utf-8") as f:
             page = f.read()
         self.assertNotIn(" style=", page)
         self.assertNotIn("<style", page)

@@ -327,7 +327,7 @@ NEWS_SPEAK_SOURCE = False
 WEBINFO_TIMEOUT = 8
 
 # --- Google Calendar + Gmail (read-only mail) ----------------------------------------
-# One-time setup: see SETUP_V3.md, then run `py google_setup.py` once and sign in.
+# One-time setup: see docs/SETUP_V3.md, then run `py raziel/google_setup.py` once and sign in.
 GOOGLE_ENABLED = True
 GOOGLE_CREDENTIALS_PATH = ""         # "" = google_credentials.json next to this file
 GOOGLE_TOKEN_PATH = ""               # "" = google_token.json next to this file
@@ -403,7 +403,7 @@ MULTI_COMMAND_ENABLED = True
 # then checks every command while Whisper is transcribing it. Only the actions in VOICE_ID_GUARDED
 # need your voice: shutting down, sending messages, deleting notes... Anyone can still ask the
 # time, the weather or play music. Phone commands always count as you (they carry your token).
-# Needs models/voice_id_resnet34.onnx (install_new_features.bat downloads it). Every check is
+# Needs models/voice_id_resnet34.onnx (scripts/install_new_features.bat downloads it). Every check is
 # logged in assistant.log as "Voice ID: 0.63 (...)" - you are usually 0.5-0.8, other people
 # below 0.35. If she refuses you too often, lower VOICE_ID_THRESHOLD a little (e.g. 0.40); if a
 # TV voice gets through, raise it. After changing your mic, delete voice_profile.npz to relearn.
@@ -446,7 +446,7 @@ CARDS_SPOTIFY_POLL_SECONDS = 5
 # "find the PDF about the bank loan", "what does my resume say about Python?", "search my files
 # for ...", then "open it". Reads Documents, Downloads and Desktop in the background with a small
 # local model through Ollama - fully offline, kept in file_index.db. One-time:
-# `ollama pull nomic-embed-text` (about 270 MB; install_new_features.bat does it). Without it
+# `ollama pull nomic-embed-text` (about 270 MB; scripts/install_new_features.bat does it). Without it
 # the search still works by words (names and text), just not by meaning.
 FILE_INDEX_ENABLED = True
 FILE_INDEX_FOLDERS = []      # empty = Documents, Downloads, Desktop; or e.g. ["Documents", r"D:\Work"]
@@ -466,8 +466,8 @@ FILE_INDEX_START_DELAY = 60  # seconds after start-up before reading begins
 # brightness. Thumbs up while a song plays = Spotify Liked Songs. Pinch (thumb + first finger, other
 # fingers open) and move = drag her window; pinch with both hands and pull apart / together = bigger
 # / smaller. "Stop watching" / "watch my hands" switch it off / on (remembered); "what gestures do
-# you know?". One-time setup: install_gestures.bat. Nothing is recorded; the camera light shows when
-# she watches. To see what she sees: venv\Scripts\python.exe gestures.py --check
+# you know?". One-time setup: scripts/install_gestures.bat. Nothing is recorded; the camera light shows when
+# she watches. To see what she sees: venv\Scripts\python.exe raziel/gestures.py --check
 GESTURES_ENABLED = False         # off 2026-10-29: the camera isn't used. True turns hand gestures back on
 GESTURES_CAMERA = 0              # which webcam (0 = the first one)
 GESTURES_PAUSE_IN_CALLS = True   # let go of the camera while Zoom / Discord / Teams is in a call

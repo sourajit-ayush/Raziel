@@ -33,7 +33,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("voice_assistant")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # the project folder
 STATE_FILE = os.path.join(_HERE, "media_duck.json")
 
 POLL_SECONDS = 0.2              # how often the peak meters are read

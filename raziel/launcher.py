@@ -12,18 +12,18 @@ You don't run this file yourself. Use:
 Once she's running, just say "Raziel" - she listens in the background all the time, exactly as
 she does when started from a command prompt.
 
-How she runs in the background: venv\\Scripts\\python.exe main.py, started with CREATE_NO_WINDOW -
+How she runs in the background: venv\\Scripts\\python.exe raziel\\main.py, started with CREATE_NO_WINDOW -
 the ordinary console Python, with a console that simply has no window. Deliberately NOT
 pythonw.exe: under pythonw there is no console at all, so every console program she starts
 herself (PowerShell for the app search, and others) would pop up a window of its own, and
-libraries that write progress bars to stderr would crash. The working folder is this folder, so
+libraries that write progress bars to stderr would crash. The working folder is the project folder, so
 every relative path in config.py (assistant.log, Raziel.onnx, ...) means the same thing it always
 did. Her log is still assistant.log; anything printed outside it (a crash before logging starts,
 pywebview's own messages) goes to raziel_console.log, and the previous run's copy is kept as
 raziel_console.prev.log.
 
 Command line (what the .bat / .pyw files call):
-    python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub
+    python raziel\\launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub
 """
 
 from __future__ import annotations
@@ -34,11 +34,12 @@ import sys
 import time
 from typing import Optional
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+CODE = os.path.dirname(os.path.abspath(__file__))                 # raziel/
+if CODE not in sys.path:
+    sys.path.insert(0, CODE)
+HERE = os.path.dirname(CODE)                                     # the project folder
 
-import instance_guard  # noqa: E402 - needs HERE on sys.path when run from a shortcut
+import instance_guard  # noqa: E402 - needs CODE on sys.path when run from a shortcut
 
 IS_WINDOWS = sys.platform == "win32"
 CREATE_NO_WINDOW = 0x08000000
@@ -47,7 +48,7 @@ STARTUP_DELAY_SECONDS = 15    # at login: give Windows, the microphone and Ollam
 STARTUP_GRACE_SECONDS = 25    # if she exits sooner than this after starting, she failed to start
 STOP_TIMEOUT_SECONDS = 15     # shutdown.py force-exits after ~4 s, so this is generous
 
-MAIN_SCRIPT = os.path.join(HERE, "main.py")
+MAIN_SCRIPT = os.path.join(CODE, "main.py")
 START_SCRIPT = os.path.join(HERE, "start_raziel.pyw")
 STOP_SCRIPT = os.path.join(HERE, "stop_raziel.pyw")
 HUB_SCRIPT = os.path.join(HERE, "open_hub.pyw")
@@ -161,7 +162,7 @@ def start(argv=()) -> int:
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", RAZIEL_BACKGROUND="1")
     try:
         with open(CONSOLE_LOG, "w", encoding="utf-8") as log:
-            log.write(f"[launcher] {time.strftime('%Y-%m-%d %H:%M:%S')} starting: {python} main.py\n")
+            log.write(f"[launcher] {time.strftime('%Y-%m-%d %H:%M:%S')} starting: {python} raziel\\main.py\n")
             log.flush()
             proc = subprocess.Popen(
                 [python, MAIN_SCRIPT],
@@ -320,7 +321,7 @@ def uninstall(out=print, ask=input) -> int:
             out(f"  (not there)  {path}")
 
     out("\nRaziel will no longer start by herself at login. "
-        "You can still start her the old way: python main.py")
+        "You can still start her the old way: python raziel/main.py")
     if instance_guard.is_running() and _yes(ask, "\nShe's running right now - stop her? [Y/n] "):
         if instance_guard.request_stop() and instance_guard.wait_until_stopped(STOP_TIMEOUT_SECONDS):
             out("Stopped.")
@@ -358,7 +359,7 @@ def main(argv=None) -> int:
         return status()
     if command == "hub":
         return open_hub()
-    print("usage: python launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub")
+    print("usage: python raziel/launcher.py install | uninstall | status | start [--delay N] [--quiet] | stop | hub")
     return 2
 
 

@@ -6,6 +6,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_reliability -v
 Nothing is started for real: whether Ollama answers, the launcher and the clock are stand-ins.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import logging.handlers
 import os
 import tempfile

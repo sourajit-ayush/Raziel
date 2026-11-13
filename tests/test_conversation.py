@@ -6,6 +6,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_conversation -v
 No microphone, no models: the recorder gets a fake stream, the transcriber and the speaker's audio are stand-ins.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import os
 import struct
 import tempfile

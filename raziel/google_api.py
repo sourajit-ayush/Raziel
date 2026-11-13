@@ -3,7 +3,7 @@ google_api.py - Google Calendar and Gmail (read-only) for Raziel, English and Hi
 
 No Google client libraries: the OAuth "installed app" loopback flow is implemented by hand (stdlib
 http.server + PKCE) and the REST APIs are called through netutil with a Bearer token, so nothing has to
-be pip-installed. Set it up once with `py google_setup.py` (see that file for the Google Cloud steps).
+be pip-installed. Set it up once with `py raziel/google_setup.py` (see that file for the Google Cloud steps).
 
 Voice features (all decided in code, no LLM - `try_handle(transcript)`):
 
@@ -63,7 +63,7 @@ import netutil
 
 logger = logging.getLogger("voice_assistant")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # the project folder
 
 AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"

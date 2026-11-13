@@ -23,6 +23,7 @@ first.
 - [Features](#features)
 - [Workflow](#workflow)
 - [Prerequisites](#prerequisites)
+- [What's in this folder](#whats-in-this-folder)
 - [Quick start](#quick-start)
 - [Optional add-ons](#optional-add-ons)
 - [Running it](#running-it)
@@ -112,7 +113,31 @@ Two things keep it fast and safe:
 - 8GB+ RAM recommended (more with a GPU) for the default `qwen3:8b` model —
   see [Tuning](#tuning) for a lighter option
 
+## What's in this folder
+
+| | |
+|---|---|
+| `README.md`, `requirements.txt`, `config.example.py` | Start here: this guide, the packages to install, the settings template |
+| `start_raziel.pyw`, `stop_raziel.pyw`, `open_hub.pyw` | Double-click to start her, stop her, or open the Hub |
+| `install_autostart.bat`, `uninstall_autostart.bat` | Start her with Windows (and undo that) |
+| `raziel/` | All of her code (`main.py` is the entry point) |
+| `scripts/` | One-time installers for the optional add-ons |
+| `docs/` | Setup walkthroughs and development notes |
+| `tests/` | The test suite: `venv\Scripts\python.exe -m unittest discover -s tests` |
+
+Your own `config.py`, the voices, the logs and her memory are created next to this file and are never
+uploaded to GitHub.
+
 ## Quick start
+
+**0. Get the code**
+
+```powershell
+git clone https://github.com/sourajit-ayush/Raziel.git
+cd Raziel
+```
+
+(or **Code → Download ZIP** on GitHub, then unzip it and open a terminal in that folder)
 
 **1. Install dependencies**
 
@@ -201,10 +226,10 @@ works fine.
 <details>
 <summary><b>Google Calendar + Gmail</b> — read-only mail, opt-in calendar events</summary>
 
-See `SETUP_V3.md` for the full walkthrough, then run:
+See [`docs/SETUP_V3.md`](docs/SETUP_V3.md) for the full walkthrough, then run:
 
 ```powershell
-python google_setup.py
+python raziel\google_setup.py
 ```
 
 and sign in in the browser. Nothing is ever sent or deleted: it reads mail
@@ -258,7 +283,7 @@ the nearest one.
 <details>
 <summary><b>New features setup</b> — AI answers, Voice ID, asking your own files</summary>
 
-Run `install_new_features.bat` once (double-click it in the project folder), with
+Run `scripts\install_new_features.bat` once (double-click it in the `scripts` folder), with
 Ollama running. It:
 
 1. installs `uiautomation` (to read ChatGPT / Gemini answers off the page) and `pypdf`
@@ -283,7 +308,7 @@ others still work, and that one feature simply stays off.
 | `FILE_INDEX_MIN_SCORE` | How close a file must match (0.5); the scores are in `assistant.log` |
 
 To learn your voice again (a new mic), delete `voice_profile.npz` and restart her.
-`venv\Scripts\python.exe voice_id.py some.wav` prints how much a recording sounds like you.
+`venv\Scripts\python.exe raziel\voice_id.py some.wav` prints how much a recording sounds like you.
 </details>
 
 <details>
@@ -316,7 +341,7 @@ resting look), `UNIVERSE_NAMES` to rename any being, `UNIVERSE_BIG_SECONDS`.
 <details>
 <summary><b>Hand gestures</b> — control music, slides and her window with your hands</summary>
 
-Run `install_gestures.bat` once (it installs MediaPipe and OpenCV and downloads an 8 MB
+Run `scripts\install_gestures.bat` once (it installs MediaPipe and OpenCV and downloads an 8 MB
 hand model), then restart Raziel. She watches the webcam about 15 times a second; nothing
 is recorded or saved, and the camera light shows whenever she watches.
 
@@ -338,7 +363,7 @@ while you talk or dropping your hand doesn't count. The knob needs a clear fist 
 model recognises; its card appears with the first step you turn. She lets go of the camera during calls, while Zoom / Teams / Meet
 or another camera app is in front, and while the PC is locked. Say "stop watching" to
 turn the camera off (remembered) and "watch my hands" to turn it back on; "what gestures
-do you know?" lists them. Run `check_gestures.bat` (with Raziel stopped) to see what she
+do you know?" lists them. Run `scripts\check_gestures.bat` (with Raziel stopped) to see what she
 sees. Each gesture group can be switched off with the `GESTURES_*` settings in `config.py`;
 if music pauses by accident, raise `GESTURES_HOLD_SECONDS`. If your hand is ignored,
 `check_gestures.bat` shows "COUNTS" or "ignored" (with why) next to it: lower
@@ -362,7 +387,7 @@ Set `AVATAR_STYLE = "vrm"` in `config.py` and place a VRM model file where
 <summary><b>Phone bridge</b> — control it from, and be reached on, your phone</summary>
 
 Full setup (Tailscale + Tasker + Join, ~15 minutes, mostly free) is in
-`PHONE_BRIDGE_SETUP.md`.
+[`docs/PHONE_BRIDGE_SETUP.md`](docs/PHONE_BRIDGE_SETUP.md).
 </details>
 
 ## Companion Deck's notch
@@ -389,7 +414,7 @@ The picture is the matching Wikipedia article's main image, at most 320 px and a
 
 One request at a time, the same as talking to her; each gives up after 120 s with `"ok": false`.
 
-**Push-to-talk** (`push_to_talk.py`). Hold **Right Ctrl**, speak, and let go: she types your words into the app in front, with dictation's checks (never into her own window), and says nothing. While she waits for her name she reads the key on every microphone frame (no keyboard hook), so:
+**Push-to-talk** (`raziel/push_to_talk.py`). Hold **Right Ctrl**, speak, and let go: she types your words into the app in front, with dictation's checks (never into her own window), and says nothing. While she waits for her name she reads the key on every microphone frame (no keyboard hook), so:
 - a hold counts after 0.3 s;
 - another key pressed or released meanwhile makes it a shortcut and cancels it (Right Ctrl + C still copies);
 - a key that stays down the whole time doesn't count.
@@ -411,7 +436,7 @@ console window), and two shortcuts appear on your Desktop:
 | `uninstall_autostart.bat` | Undoes all of the above (removes the three shortcuts, nothing else) |
 
 Only one Raziel runs at a time: starting her again while she's running (or
-typing `python main.py` out of habit) just tells you she's already running.
+typing `python raziel\main.py` out of habit) just tells you she's already running.
 If she ever fails to start, the reason is at the end of `assistant.log` or
 `raziel_console.log`.
 
@@ -419,7 +444,7 @@ If she ever fails to start, the reason is at the end of `assistant.log` or
 
 ```powershell
 venv\Scripts\activate
-python main.py
+python raziel\main.py
 ```
 
 Press `Ctrl+C` to stop.
@@ -481,7 +506,7 @@ useful ones to know about:
 | Setting | What it does |
 |---|---|
 | `WAKE_WORD_MODEL` / `WAKE_WORD_THRESHOLD` | Swap the wake word or adjust sensitivity — lower if it's not triggering, raise if it triggers randomly |
-| `SILENCE_RMS_THRESHOLD` | Lower if it cuts you off mid-sentence, raise if it never stops recording in a noisy room. Run `python mic_test.py` to measure your real mic levels |
+| `SILENCE_RMS_THRESHOLD` | Lower if it cuts you off mid-sentence, raise if it never stops recording in a noisy room. Run `python raziel\mic_test.py` to measure your real mic levels |
 | `WHISPER_MODEL_SIZE` | `tiny`/`base` = faster, less accurate. `small`/`medium` = slower, more accurate |
 | `OLLAMA_MODEL` | `qwen3:8b` by default; try `llama3.2` (`ollama pull llama3.2` first) if it's too slow on your machine |
 | `HINDI_ENABLED` | Set `False` for English-only |
@@ -492,7 +517,7 @@ useful ones to know about:
 `open_app` already searches Start Menu shortcuts (covering almost anything
 installed) with website fallbacks for a few common ones. For anything it
 still can't find, add it to the `APP_COMMANDS` dictionary at the top of
-`tools.py`:
+`raziel/tools.py`:
 
 ```python
 "discord": "discord.exe",
@@ -502,10 +527,10 @@ still can't find, add it to the `APP_COMMANDS` dictionary at the top of
 
 | Doc | Covers |
 |---|---|
-| [`PROJECT.md`](PROJECT.md) | The full development log and feature history |
-| [`SETUP_V3.md`](SETUP_V3.md) | Setup for Hindi / Google knowledge / PC-control features |
-| [`PHONE_BRIDGE_SETUP.md`](PHONE_BRIDGE_SETUP.md) | Setup for talking to Raziel from your phone |
-| [`HANDOFF.md`](HANDOFF.md) | Internal notes on the codebase's structure and safety rules |
+| [`docs/PROJECT.md`](docs/PROJECT.md) | The full development log and feature history |
+| [`docs/SETUP_V3.md`](docs/SETUP_V3.md) | Setup for Hindi / Google knowledge / PC-control features |
+| [`docs/PHONE_BRIDGE_SETUP.md`](docs/PHONE_BRIDGE_SETUP.md) | Setup for talking to Raziel from your phone |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | Internal notes on the codebase's structure and safety rules |
 
 ## Troubleshooting
 
@@ -519,9 +544,9 @@ whatever the default output is.
 <details>
 <summary>"No module named 'piper'" or voice file not found</summary>
 
-Make sure you ran the download command from this exact project folder,
-since `PIPER_MODEL_PATH` looks for the `.onnx` file right next to the
-scripts.
+Make sure you ran the download command from the project folder (the one
+with `README.md`), since `PIPER_MODEL_PATH` looks for the `.onnx` file
+there.
 </details>
 
 <details>
@@ -547,7 +572,7 @@ Raise `WAKE_WORD_THRESHOLD`, or reduce background noise/TV/music near the mic.
 <details>
 <summary>It mishears you constantly</summary>
 
-Run `python mic_test.py` to check your actual mic levels. Also check
+Run `python raziel\mic_test.py` to check your actual mic levels. Also check
 Windows Sound settings for Microphone Boost set too high, which can make
 background noise look like speech.
 </details>
@@ -582,6 +607,6 @@ Check that the **Raziel** shortcut is in your Startup folder (press
 **Task Manager → Startup apps**. If she tried and failed, you'll get a
 message box, and the reason is at the end of `assistant.log` or
 `raziel_console.log`. If your PC is slow to log in, raise
-`STARTUP_DELAY_SECONDS` in `launcher.py` and run `install_autostart.bat`
+`STARTUP_DELAY_SECONDS` in `raziel\launcher.py` and run `install_autostart.bat`
 again.
 </details>

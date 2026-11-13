@@ -3,11 +3,11 @@ wake_test.py - find out WHY "Raziel" does not wake her up.
 
 Close main.py first (only one program should own the microphone), then:
 
-    py wake_test.py            guided test: you say the wake word ~15 times, it scores every take
-    py wake_test.py live       free-running monitor: say things, watch the scores move
-    py wake_test.py record     record YOUR voice (about 5 minutes) so Raziel can be retrained on it
-    py wake_test.py record --negatives-only   only the "other words" part (about 3 minutes)
-    py wake_test.py devices    list microphones (use --device N to pick one)
+    py raziel/wake_test.py            guided test: you say the wake word ~15 times, it scores every take
+    py raziel/wake_test.py live       free-running monitor: say things, watch the scores move
+    py raziel/wake_test.py record     record YOUR voice (about 5 minutes) so Raziel can be retrained on it
+    py raziel/wake_test.py record --negatives-only   only the "other words" part (about 3 minutes)
+    py raziel/wake_test.py devices    list microphones (use --device N to pick one)
 
 It uses exactly the same model, the same microphone settings (16 kHz, 80 ms chunks)
 and the same openWakeWord call as wake_word.py, so what you see here is what she hears.
@@ -33,9 +33,10 @@ import wave
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+CODE = os.path.dirname(os.path.abspath(__file__))
+if CODE not in sys.path:
+    sys.path.insert(0, CODE)
+HERE = os.path.dirname(CODE)      # the project folder
 
 SAMPLE_RATE = 16000
 CHUNK = 1280                      # 80 ms - the same as config.FRAME_LENGTH
@@ -58,7 +59,7 @@ def _import_pyaudio():
         return pyaudio
     except ImportError:
         sys.exit("pyaudio is not installed in this Python. Run this with the same Python as main.py "
-                 "(the venv in this folder), e.g.  venv\\Scripts\\python.exe wake_test.py")
+                 "(the venv in this folder), e.g.  venv\\Scripts\\python.exe raziel/wake_test.py")
 
 
 def load_models(control=True):
@@ -263,7 +264,7 @@ def summarise(results):
                   "Fix = retrain including your own recordings (send me the wake_takes folder).")
         else:
             print("  * Raziel scored ~0 on everything and the Jarvis control did not react either (or was "
-                  "skipped). Suspect the microphone / device / level - run  py wake_test.py devices.")
+                  "skipped). Suspect the microphone / device / level - run  py raziel/wake_test.py devices.")
     else:
         print(f"  * Raziel reacts a little (best {best:.2f}) but rarely reaches {THRESHOLD:g}. Lowering "
               f"WAKE_WORD_THRESHOLD toward {max(0.1, round(best * 0.7, 2)):g} would catch more, at the price "
@@ -686,7 +687,7 @@ Recordings are in: {VOICE_DIR}
 Next: retrain so she learns your voice. In the Raziel Training folder:
     py -3.12 raziel_train.py retrain
 (about 30-40 minutes: it adds your recordings to the training data, then trains). Then copy the new
-Raziel.onnx from Raziel Training\\my_custom_model into this folder, and run  py wake_test.py  again.""")
+Raziel.onnx from Raziel Training\\my_custom_model into this folder, and run  py raziel/wake_test.py  again.""")
 
 
 def scale_plan(plan, total):

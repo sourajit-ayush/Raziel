@@ -140,7 +140,7 @@ pip install -r requirements.txt
 python -c "import openwakeword; openwakeword.utils.download_models()"
 python -m piper.download_voices en_GB-cori-high
 ollama pull qwen3:8b
-python main.py
+python raziel/main.py
 ```
 
 - **Spotify**: needs Premium + free dev app. Redirect URI **must** be

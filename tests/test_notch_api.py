@@ -6,6 +6,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_notch_api -v
 No network and no Ollama needed; the socket runs on a spare local port with a temporary token.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import asyncio
 import io
 import json

@@ -1,7 +1,7 @@
 @echo off
 REM Installs PyAudioWPatch: lets the orb avatar hear what this PC is playing, so it can dance to music.
 REM Safe to run again; it only installs into this project's venv.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if not exist "venv\Scripts\python.exe" (
   echo Could not find venv\Scripts\python.exe next to this file.
   pause

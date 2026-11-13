@@ -5,6 +5,10 @@ speaking MCP over stdio, but no packages and no network.
 Run: venv\\Scripts\\python.exe -m unittest test_mcp -v
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import os
 import sys
 import tempfile

@@ -25,7 +25,7 @@ Tested on your own clips: held-out recordings of you scored 0.51-0.8, 125 other 
 Clear checks of you (>= 0.6) slowly adapt the profile to how you sound through the mic day to day.
 Every check is written to assistant.log ("Voice ID: 0.63 -> you") so the thresholds can be tuned.
 
-The model file is downloaded once by install_new_features.bat (models\\voice_id_resnet34.onnx). Without
+The model file is downloaded once by scripts/install_new_features.bat (models\\voice_id_resnet34.onnx). Without
 it Voice ID is simply off and everything works as before. To learn your voice again (new mic), delete
 voice_profile.npz and restart her.
 """
@@ -215,7 +215,7 @@ def get_model() -> Optional[Model]:
             return _model
         path = model_path()
         if not os.path.isfile(path):
-            logger.info("Voice ID is off: the model isn't downloaded yet (%s) - run install_new_features.bat", path)
+            logger.info("Voice ID is off: the model isn't downloaded yet (%s) - run scripts/install_new_features.bat", path)
             _model_failed = True
             return None
         try:
@@ -475,8 +475,8 @@ def answer_refusal(summary: str) -> Optional[str]:
 
 
 if __name__ == "__main__":
-    # venv\Scripts\python.exe voice_id.py            learn your voice now (from my_voice\)
-    # venv\Scripts\python.exe voice_id.py clip.wav   how much a recording sounds like you
+    # venv\Scripts\python.exe raziel/voice_id.py            learn your voice now (from my_voice\)
+    # venv\Scripts\python.exe raziel/voice_id.py clip.wav   how much a recording sounds like you
     import sys
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if get_model() is None:

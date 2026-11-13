@@ -5,7 +5,7 @@ REM   2. downloads the hand-gesture model (about 8 MB) into models\
 REM   3. checks that the model loads and the camera opens
 REM Safe to run again. Everything is written to install_gestures.log.
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set LOG=install_gestures.log
 set PY=venv\Scripts\python.exe
 set MODEL=models\gesture_recognizer.task
@@ -69,7 +69,7 @@ if errorlevel 1 (
 echo.
 if %FAILED%==0 (
   echo All done. Restart Raziel: "Stop Raziel", then "Start Raziel".
-  echo To see what she sees, run check_gestures.bat while Raziel is stopped.
+  echo To see what she sees, run scripts/check_gestures.bat while Raziel is stopped.
 ) else (
   echo Something failed - the messages above and %LOG% say what.
 )

@@ -1,7 +1,7 @@
 ### Raziel voice assistant — files that must never be pushed to GitHub ###
 
 # --- Secrets: API keys, tokens, phone numbers ---
-config.py
+/config.py
 google_credentials.json
 google_token.json
 .spotify_cache
@@ -58,3 +58,4 @@ gestures_debug.jsonl
 gestures_debug.old.jsonl
 folder_names.json
 mcp_tools_cache.json
+temp_recording.wav.early.wav

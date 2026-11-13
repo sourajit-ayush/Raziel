@@ -53,7 +53,7 @@ by opening a pre-filled Google Calendar page for you to press Save; only reading
    *Testing*, add your own Gmail as a test user and re-run step 5 every 7 days.
 4. **Clients -> Create client -> Desktop app -> Download JSON**. Save it in the Voice Agent folder as
    `google_credentials.json`.
-5. Run once: `py google_setup.py` and sign in in the browser. `py google_setup.py --check` tests it later.
+5. Run once: `py raziel/google_setup.py` and sign in in the browser. `py raziel/google_setup.py --check` tests it later.
 
 She can **read** mail (sender + subject of the newest three, never the body sent anywhere) and **add** events only after
 you say yes. She can never send, change or delete mail or events.

@@ -5,6 +5,10 @@ Run: venv\\Scripts\\python.exe -m unittest test_obsidian_memory -v
 Everything happens in a temporary vault and a temporary memory.db; the LLM and the embeddings are stand-ins.
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "raziel"))
+
 import json
 import os
 import shutil

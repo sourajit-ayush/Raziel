@@ -38,7 +38,7 @@ from mcp_client import DEFAULT_CALL_TIMEOUT, INIT_TIMEOUT, McpError, McpServer, 
 
 logger = logging.getLogger("voice_assistant")
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
+_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # the project folder
 CACHE_PATH = os.path.join(_DIR, "mcp_tools_cache.json")
 PREFIX = "mcp_"
 STARTUP_WAIT = 25.0

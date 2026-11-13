@@ -6,7 +6,7 @@ REM   3. learns your voice from my_voice\
 REM   4. asks Ollama for the small file-search model (nomic-embed-text, about 270 MB)
 REM Safe to run again: finished steps are skipped. Everything is written to install_new_features.log.
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set LOG=install_new_features.log
 set PY=venv\Scripts\python.exe
 set MODEL=models\voice_id_resnet34.onnx
@@ -59,7 +59,7 @@ if errorlevel 1 (
 echo       OK
 
 echo [3/4] Learning your voice from my_voice\ ...
-"%PY%" voice_id.py >> "%LOG%" 2>&1
+"%PY%" raziel\voice_id.py >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo       FAILED - see %LOG%
   set FAILED=1

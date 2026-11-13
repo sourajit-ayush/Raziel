@@ -34,8 +34,8 @@ How it works
     The camera is let go during a call (quiet_mode.py: Zoom / Discord / Teams using the mic) and
     while "stop watching" is in effect (remembered across restarts in gestures_state.json).
 
-Setup: install_gestures.bat (mediapipe + OpenCV, and the 8 MB model). To see what she sees:
-    venv\\Scripts\\python.exe gestures.py --check      (close Raziel or say "stop watching" first)
+Setup: scripts/install_gestures.bat (mediapipe + OpenCV, and the 8 MB model). To see what she sees:
+    venv\\Scripts\\python.exe raziel/gestures.py --check      (close Raziel or say "stop watching" first)
 
 Settings (config.py): GESTURES_ENABLED, GESTURES_CAMERA, GESTURES_PAUSE_IN_CALLS, GESTURES_MUSIC,
 GESTURES_KNOB, GESTURES_LIKE, GESTURES_SLIDES, GESTURES_SKIP, GESTURES_WINDOW, GESTURES_HOLD_SECONDS,
@@ -658,8 +658,8 @@ _T = {
                      "hi": "कैमरे में कुछ गड़बड़ हुई थी, इसलिए मैंने उसे फिर से शुरू किया है।"},
     "status_off": {"en": "No, I'm not watching. Say 'watch my hands' to turn it on.",
                    "hi": "नहीं, मैं नहीं देख रही। चालू करने के लिए कहिए 'मेरे हाथ देखो'।"},
-    "not_set_up": {"en": "Hand gestures need a one-time setup: run install_gestures.bat in my folder, then restart me.",
-                   "hi": "हाथ के इशारों के लिए एक बार सेटअप चाहिए: मेरे फ़ोल्डर में install_gestures.bat चलाइए, फिर मुझे रीस्टार्ट कीजिए।"},
+    "not_set_up": {"en": "Hand gestures need a one-time setup: run scripts/install_gestures.bat in my folder, then restart me.",
+                   "hi": "हाथ के इशारों के लिए एक बार सेटअप चाहिए: मेरे फ़ोल्डर में scripts/install_gestures.bat चलाइए, फिर मुझे रीस्टार्ट कीजिए।"},
     "no_camera": {"en": "I can't open the camera. Is another app using it, or is camera access for desktop apps off in Windows settings?",
                   "hi": "मैं कैमरा नहीं खोल पा रही। क्या कोई और ऐप उसे चला रहा है, या Windows सेटिंग्स में डेस्कटॉप ऐप्स के लिए कैमरा बंद है?"},
     "disabled": {"en": "Hand gestures are switched off in the settings.", "hi": "हाथ के इशारे सेटिंग्स में बंद हैं।"},
@@ -1262,13 +1262,13 @@ class Watcher:
     def _camera_loop(self):
         if not os.path.isfile(model_path()):
             self.status = "no_model"
-            logger.info("Hand gestures are off: the model isn't there yet (%s) - run install_gestures.bat", model_path())
+            logger.info("Hand gestures are off: the model isn't there yet (%s) - run scripts/install_gestures.bat", model_path())
             return
         try:
             rec = self.make_recognizer()
         except Exception as e:  # noqa: BLE001
             self.status = "no_model"
-            logger.warning("Hand gestures are off: couldn't load MediaPipe (%s) - run install_gestures.bat", e)
+            logger.warning("Hand gestures are off: couldn't load MediaPipe (%s) - run scripts/install_gestures.bat", e)
             return
         cam = None
         told = False
@@ -1503,7 +1503,7 @@ def _check():
     import cv2
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not os.path.isfile(model_path()):
-        print("The model isn't there yet:", model_path(), "- run install_gestures.bat first.")
+        print("The model isn't there yet:", model_path(), "- run scripts/install_gestures.bat first.")
         return 1
     rec = Recognizer(model_path())
     try:

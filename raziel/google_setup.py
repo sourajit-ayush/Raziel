@@ -1,7 +1,7 @@
 """
 google_setup.py - connect Raziel to your Google account. Run it ONCE:
 
-    py google_setup.py
+    py raziel/google_setup.py
 
 It needs the OAuth client file `google_credentials.json` in the Voice Agent folder (see the steps it prints
 if the file is missing), opens your browser for the Google sign-in, saves the token to `google_token.json`
@@ -48,7 +48,7 @@ You need to create a free Google "OAuth client" once (about 5 minutes):
   5. Save that file as  google_credentials.json  in this folder:
        {folder}
 
-Then run this again:   py google_setup.py
+Then run this again:   py raziel/google_setup.py
 """
 
 
@@ -95,7 +95,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if check_only:
         if not google_api.is_connected():
-            _say("Not signed in yet. Run:  py google_setup.py")
+            _say("Not signed in yet. Run:  py raziel/google_setup.py")
             return 1
         try:
             email = google_api.get_profile_email()

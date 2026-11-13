@@ -47,7 +47,7 @@ logger = logging.getLogger("voice_assistant")
 SPEAK_CHARS = 300          # how much of the clipboard is read aloud
 LLM_CHARS = 3000           # how much of the clipboard is sent to the model
 NOTE_CHARS = 20000         # longest text saved as a note
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # the project folder
 
 # ------------------------------------------------------------------ strings (English / Hindi)
 

@@ -9,6 +9,6 @@ if not exist "venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
-"venv\Scripts\python.exe" launcher.py uninstall
+"venv\Scripts\python.exe" raziel\launcher.py uninstall
 echo.
 pause
